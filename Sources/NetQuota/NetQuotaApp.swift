@@ -78,9 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct NetQuotaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel.shared
+    /// 直接觀察設定，選單列開關才會即時生效。
+    @StateObject private var settings = AppModel.shared.settings
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: $settings.showMenuBarItem) {
             ThemedRoot(settings: model.settings) {
                 PopoverView()
             }

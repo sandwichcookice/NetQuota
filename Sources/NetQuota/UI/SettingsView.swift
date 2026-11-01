@@ -21,6 +21,7 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 260)
                 Text(settings.theme.subtitle).font(.caption).foregroundStyle(.secondary)
+                Toggle("色盲友善配色（下載藍、上傳橘）", isOn: $settings.colorBlindFriendly)
                 if settings.theme == .standard {
                     Label(theme.liquidGlass ? "這台 Mac 支援，已自動套用 Apple Liquid Glass"
                                             : "未套用 Apple Liquid Glass（需要 macOS 26，且沒有開啟「減少透明度」）",
@@ -68,11 +69,24 @@ struct SettingsView: View {
             }
 
             Section("選單列") {
+                Toggle("在選單列顯示 NetQuota", isOn: $settings.showMenuBarItem)
+                if !settings.showMenuBarItem {
+                    Text("NetQuota 仍會在背景記錄、照常通知。要看儀表板時，用 Spotlight 搜尋「NetQuota」打開。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Picker("顯示", selection: $settings.menuBarStyle) {
                     ForEach(MenuBarStyle.allCases) { Text($0.title).tag($0) }
                 }
                 .frame(maxWidth: 360)
+                .disabled(!settings.showMenuBarItem)
                 Toggle("同時顯示即時速率", isOn: $settings.showSpeedInMenuBar)
+                    .disabled(!settings.showMenuBarItem)
+                HStack {
+                    Text("看不到選單列圖示？選單列太滿時，最左邊的圖示會被瀏海擋住。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("把圖示移到右側") { moveStatusItemRight() }
+                }
             }
 
             Section("系統") {
@@ -104,6 +118,18 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(theme.isHack || theme.isGlass ? .hidden : .automatic)
+    }
+
+    /// 寫入偏好位置後重新啟動 App，選單列圖示會出現在右側看得到的位置。
+    /// 原本在它左邊的其他圖示可能會被擠到隱藏區。
+    private func moveStatusItemRight() {
+        UserDefaults.standard.set(AppSettings.visibleStatusItemPosition, forKey: AppSettings.statusItemPositionKey)
+        let path = Bundle.main.bundlePath
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", path]
+        try? relaunch.run()
+        NSApp.terminate(nil)
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {

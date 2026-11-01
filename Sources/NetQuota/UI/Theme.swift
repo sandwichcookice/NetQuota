@@ -30,10 +30,10 @@ enum AppTheme: String, CaseIterable, Identifiable {
 struct Theme {
     let kind: AppTheme
     let accent: Color
-    let download: Color
-    let upload: Color
+    var download: Color
+    var upload: Color
     let good: Color
-    let warn: Color
+    var warn: Color
     let bad: Color
     let secondary: Color
     var cardRadius: CGFloat
@@ -45,6 +45,25 @@ struct Theme {
     var isGlass: Bool {
         if #available(macOS 26.0, *) { return kind == .glass }
         return false
+    }
+
+    /// 色盲友善配色：藍和橘在紅綠色盲下也分得出來；警示改成琥珀色，避免和上傳撞色。
+    func colorBlindFriendly() -> Theme {
+        var copy = self
+        switch kind {
+        case .hack:
+            copy.upload = Color(red: 1.00, green: 0.60, blue: 0.10)
+            copy.warn = Color(red: 1.00, green: 0.92, blue: 0.20)
+        case .glass:
+            copy.download = Color(red: 0.45, green: 0.78, blue: 1.00)
+            copy.upload = Color(red: 1.00, green: 0.62, blue: 0.33)
+            copy.warn = Color(red: 1.00, green: 0.84, blue: 0.30)
+        case .standard:
+            copy.download = .blue
+            copy.upload = Color(red: 0.93, green: 0.45, blue: 0.10)
+            copy.warn = Color(red: 0.88, green: 0.66, blue: 0.00)
+        }
+        return copy
     }
 
     /// 依系統狀態調整：macOS 26 且沒開「減少透明度」時，「預設」風格採用 Apple Liquid Glass。
@@ -75,14 +94,14 @@ struct Theme {
         isHack ? "// \(text)" : text
     }
 
-    /// 下載藍、上傳橘：色盲也分得出來的配對。警示改用琥珀色，避免和上傳撞色。
     static let standard = Theme(
         kind: .standard,
         accent: .accentColor,
         download: .blue,
-        upload: Color(red: 0.93, green: 0.45, blue: 0.10),
+        // 系統紫在深色模式下偏粉，調淡一點。
+        upload: Color(red: 0.76, green: 0.58, blue: 0.96),
         good: .green,
-        warn: Color(red: 0.88, green: 0.66, blue: 0.00),
+        warn: .orange,
         bad: .red,
         secondary: .secondary,
         cardRadius: 8
@@ -93,9 +112,9 @@ struct Theme {
         kind: .glass,
         accent: .accentColor,
         download: Color(red: 0.45, green: 0.78, blue: 1.00),
-        upload: Color(red: 1.00, green: 0.62, blue: 0.33),
+        upload: Color(red: 0.88, green: 0.62, blue: 1.00),
         good: Color(red: 0.42, green: 0.92, blue: 0.58),
-        warn: Color(red: 1.00, green: 0.84, blue: 0.30),
+        warn: Color(red: 1.00, green: 0.72, blue: 0.30),
         bad: Color(red: 1.00, green: 0.45, blue: 0.45),
         // 透明玻璃上系統的次要文字色太淡，提高對比。
         secondary: Color.white.opacity(0.78),
@@ -141,7 +160,8 @@ struct ThemedRoot<Content: View>: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        let theme = Theme.of(settings.theme).adapted(reduceTransparency: reduceTransparency)
+        let base = Theme.of(settings.theme).adapted(reduceTransparency: reduceTransparency)
+        let theme = settings.colorBlindFriendly ? base.colorBlindFriendly() : base
         content
             .environment(\.theme, theme)
             .fontDesign(theme.isHack ? .monospaced : .default)
