@@ -6,34 +6,37 @@ import UniformTypeIdentifiers
 /// 匯出 CSV（數值一律用 bytes，方便用試算表自行換算）。
 @MainActor
 enum CSVExporter {
+    /// 每天一列「全部網路」，加上每個網路各一列（over_quota 依該網路自己的上限判斷）。
     static func dailySummaryCSV(collector: TrafficCollector, policy: QuotaPolicy) -> String {
+        collector.flush()
         let from = collector.store.firstRecord() ?? Date()
-        var summaries = collector.store.dailySummaries(from: from, to: Date(), policy: policy)
-        if let index = summaries.firstIndex(where: { $0.day == collector.dayKey }) {
-            summaries[index].bytes = collector.today
-            summaries[index].calibration = collector.calibration
-            summaries[index].peak = collector.peak
-        }
-        var lines = ["date,download_bytes,upload_bytes,calibration_bytes,total_bytes,total_gb,over_quota,peak_download_Bps,peak_download_at,peak_upload_Bps,peak_upload_at"]
+        let scopes: [(id: String?, name: String, quota: Double?)] =
+            [(nil, "全部網路", nil)] + collector.networks.map { ($0.id, $0.displayName, $0.quotaBytes) }
+        var rows: [(day: String, order: Int, line: String)] = []
         let iso = ISO8601DateFormatter()
         iso.timeZone = .current
-        for day in summaries {
-            let peak = day.peak ?? DayPeak()
-            lines.append([
-                day.day,
-                String(day.bytes.rx),
-                String(day.bytes.tx),
-                String(Int64(day.calibration)),
-                String(Int64(day.total)),
-                String(format: "%.3f", day.total / 1_000_000_000),
-                day.total > policy.quotaBytes ? "1" : "0",
-                String(Int64(peak.rxRate)),
-                peak.rxAt.map { iso.string(from: $0) } ?? "",
-                String(Int64(peak.txRate)),
-                peak.txAt.map { iso.string(from: $0) } ?? "",
-            ].joined(separator: ","))
+        for (order, scope) in scopes.enumerated() {
+            for day in collector.store.dailySummaries(from: from, to: Date(), policy: policy, network: scope.id) {
+                // 個別網路沒有用量的日子不列出。
+                if scope.id != nil, day.total == 0 { continue }
+                let isAll = scope.id == nil
+                let peak = isAll ? (day.peak ?? DayPeak()) : DayPeak()
+                let quotaText: String = scope.quota.map { String(Int64($0)) } ?? ""
+                let overText: String = scope.quota.map { day.total > $0 ? "1" : "0" } ?? ""
+                let rxPeak: String = isAll ? String(Int64(peak.rxRate)) : ""
+                let txPeak: String = isAll ? String(Int64(peak.txRate)) : ""
+                let rxAt: String = peak.rxAt.map { iso.string(from: $0) } ?? ""
+                let txAt: String = peak.txAt.map { iso.string(from: $0) } ?? ""
+                var fields: [String] = [day.day, escape(scope.name), String(day.bytes.rx), String(day.bytes.tx)]
+                fields += [String(Int64(day.calibration)), String(Int64(day.total)),
+                           String(format: "%.3f", day.total / 1_000_000_000)]
+                fields += [quotaText, overText, rxPeak, rxAt, txPeak, txAt]
+                rows.append((day.day, order, fields.joined(separator: ",")))
+            }
         }
-        return lines.joined(separator: "\n") + "\n"
+        let header = "date,network,download_bytes,upload_bytes,calibration_bytes,total_bytes,total_gb,quota_bytes,over_quota,peak_download_Bps,peak_download_at,peak_upload_Bps,peak_upload_at"
+        let body = rows.sorted { ($0.day, $0.order) < ($1.day, $1.order) }.map(\.line)
+        return ([header] + body).joined(separator: "\n") + "\n"
     }
 
     static func appDailyCSV(collector: TrafficCollector, policy: QuotaPolicy) -> String {
@@ -78,7 +81,7 @@ enum CSVExporter {
             NSWorkspace.shared.activateFileViewerSelecting([folder])
             let alert = NSAlert()
             alert.messageText = "資料集已匯出"
-            alert.informativeText = "每分鐘 \(result.minuteRows) 筆、各程式 \(result.appRows) 筆、每日 \(result.dayRows) 筆。欄位說明在 SCHEMA.md。"
+            alert.informativeText = "原始樣本 \(result.sampleRows) 筆、程式原始樣本 \(result.appSampleRows) 筆、每分鐘 \(result.minuteRows) 筆、各程式 \(result.appRows) 筆、各網路 \(result.networkRows) 筆、每日 \(result.dayRows) 筆。欄位說明在 SCHEMA.md。"
             alert.runModal()
         } catch {
             NSAlert(error: error).runModal()
@@ -108,7 +111,7 @@ struct ExportMenu: View {
                                  suggestedName: "NetQuota-各程式每日.csv")
             }
             Divider()
-            Button("機器學習資料集（每分鐘）…") {
+            Button("機器學習資料集（原始樣本＋每分鐘）…") {
                 CSVExporter.exportDataset(collector: collector, policy: settings.policy)
             }
         } label: {

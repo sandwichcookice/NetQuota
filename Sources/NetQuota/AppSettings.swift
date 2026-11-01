@@ -22,7 +22,8 @@ enum MenuBarStyle: String, CaseIterable, Identifiable {
 final class AppSettings: ObservableObject {
     private let defaults = UserDefaults.standard
 
-    @Published var quotaGB: Double { didSet { defaults.set(quotaGB, forKey: "quotaGB") } }
+    /// 舊版的單一上限，只用來在升級時套用到第一個偵測到的網路。上限現在依網路各自設定。
+    let quotaGB: Double
     @Published var binaryUnits: Bool { didSet { defaults.set(binaryUnits, forKey: "binaryUnits") } }
     @Published var resetHour: Int { didSet { defaults.set(resetHour, forKey: "resetHour") } }
     @Published var alertsEnabled: Bool { didSet { defaults.set(alertsEnabled, forKey: "alertsEnabled") } }
@@ -58,8 +59,9 @@ final class AppSettings: ObservableObject {
         showSpeedInMenuBar = defaults.bool(forKey: "showSpeedInMenuBar")
     }
 
+    /// 「一天」的切法（上限依網路各自設定，這裡不使用 quotaBytes）。
     var policy: QuotaPolicy {
-        QuotaPolicy(quotaBytes: QuotaPolicy.quotaBytes(gb: quotaGB, binary: binaryUnits), resetHour: resetHour)
+        QuotaPolicy(quotaBytes: 0, resetHour: resetHour)
     }
 
     func format(_ bytes: Double) -> String { ByteFormat.bytes(bytes, binary: binaryUnits) }

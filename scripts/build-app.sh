@@ -49,6 +49,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
+    <key>NSLocationUsageDescription</key>
+    <string>NetQuota 需要定位權限才能讀取 Wi-Fi 名稱，用來分開計算各網路的流量。不會取得或記錄你的位置。</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>NetQuota 需要定位權限才能讀取 Wi-Fi 名稱，用來分開計算各網路的流量。不會取得或記錄你的位置。</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>

@@ -19,7 +19,8 @@ enum UsageColor {
 struct UsageRing: View {
     let fraction: Double
     let usedText: String
-    let quotaText: String
+    /// nil 代表沒有設定上限。
+    let quotaText: String?
     var lineWidth: CGFloat = 12
 
     var body: some View {
@@ -34,12 +35,18 @@ struct UsageRing: View {
                 Text(usedText)
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("/ \(quotaText)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("\(Int((fraction * 100).rounded()))%")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(UsageColor.forFraction(fraction))
+                if let quotaText {
+                    Text("/ \(quotaText)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(Int((fraction * 100).rounded()))%")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(UsageColor.forFraction(fraction))
+                } else {
+                    Text("未設定上限")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -123,6 +130,42 @@ struct AppUsageRow: View {
                     .clipShape(Capsule())
                 }
                 .frame(height: 4)
+            }
+        }
+    }
+}
+
+enum NetworkIcon {
+    /// en0 在 MacBook 上是 Wi-Fi；其他 en* 多半是有線或 USB 網卡。
+    static func symbol(for interface: String?) -> String {
+        interface == "en0" ? "wifi" : "cable.connector"
+    }
+}
+
+/// 一個網路今天的用量與上限。
+struct NetworkUsageRow: View {
+    let usage: NetworkUsage
+    let format: (Double) -> String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: NetworkIcon.symbol(for: usage.network.interface))
+                    .foregroundStyle(.secondary).frame(width: 14)
+                Text(usage.network.displayName).lineLimit(1)
+                if usage.isCurrent {
+                    Text("目前").font(.caption2).padding(.horizontal, 4)
+                        .background(.tint.opacity(0.2), in: Capsule())
+                }
+                Spacer()
+                Text(usage.quota.map { "\(format(usage.used)) / \(format($0))" } ?? format(usage.used))
+                    .monospacedDigit().foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            if let fraction = usage.fraction {
+                ProgressView(value: min(fraction, 1))
+                    .tint(UsageColor.forFraction(fraction))
+                    .controlSize(.mini)
             }
         }
     }

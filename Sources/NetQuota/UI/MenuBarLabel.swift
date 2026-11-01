@@ -34,13 +34,19 @@ struct MenuBarLabel: View {
     private var text: String {
         let binary = settings.binaryUnits
         var parts: [String] = []
-        switch settings.menuBarStyle {
-        case .usedOfQuota:
-            parts.append("\(ByteFormat.compactGB(collector.used, binary: binary))/\(ByteFormat.compactGB(collector.quota, binary: binary))G")
-        case .remaining:
-            parts.append("剩 \(ByteFormat.compactGB(collector.remaining, binary: binary))G")
-        case .percent:
-            parts.append("\(Int((collector.fraction * 100).rounded()))%")
+        let used = ByteFormat.compactGB(collector.used, binary: binary)
+        // 目前的網路沒有設定上限時，只顯示今日用量。
+        if let quota = collector.quota, let remaining = collector.remaining {
+            switch settings.menuBarStyle {
+            case .usedOfQuota:
+                parts.append("\(used)/\(ByteFormat.compactGB(quota, binary: binary))G")
+            case .remaining:
+                parts.append("剩 \(ByteFormat.compactGB(remaining, binary: binary))G")
+            case .percent:
+                parts.append("\(Int((collector.fraction * 100).rounded()))%")
+            }
+        } else {
+            parts.append("\(used)G")
         }
         if settings.showSpeedInMenuBar {
             parts.append("↓\(ByteFormat.compactRate(collector.rxRate)) ↑\(ByteFormat.compactRate(collector.txRate))")

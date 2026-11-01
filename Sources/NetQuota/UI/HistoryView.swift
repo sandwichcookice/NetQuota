@@ -45,6 +45,8 @@ struct HistoryView: View {
         var id: String { "\(row.id)-\(kind)" }
     }
 
+    /// 空字串 = 全部網路，其他為網路 id。
+    @State private var network = ""
     @State private var span: Span = .month
     @State private var grouping: Grouping = .day
     @State private var rows: [Row] = []
@@ -62,6 +64,11 @@ struct HistoryView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 140)
+                Picker("網路", selection: $network) {
+                    Text("全部網路").tag("")
+                    ForEach(collector.networks) { Text($0.displayName).tag($0.id) }
+                }
+                .frame(maxWidth: 220)
                 Spacer()
                 ExportMenu()
             }
@@ -70,7 +77,16 @@ struct HistoryView: View {
             table
         }
         .padding(20)
-        .task(id: "\(span.rawValue)-\(grouping.rawValue)-\(collector.dataVersion)") { reload() }
+        .task(id: "\(span.rawValue)-\(grouping.rawValue)-\(network)-\(collector.dataVersion)") { reload() }
+    }
+
+    /// 選定網路的每日上限；全部網路或沒設定時為 nil。
+    private var quota: Double? {
+        collector.networks.first { $0.id == network }?.quotaBytes
+    }
+
+    private func isOver(_ row: Row) -> Bool {
+        grouping == .day && row.total > (quota ?? .infinity)
     }
 
     private var summary: some View {
@@ -78,12 +94,13 @@ struct HistoryView: View {
         let active = days.filter { $0.total > 0 }
         let average = active.isEmpty ? 0 : active.reduce(0) { $0 + $1.total } / Double(active.count)
         let maxDay = days.max { $0.total < $1.total }
-        let over = days.filter { $0.total > collector.quota }.count
+        let over = days.filter { $0.total > (quota ?? .infinity) }.count
         return HStack(spacing: 10) {
             StatTile(title: "區間合計", value: settings.format(days.reduce(0) { $0 + $1.total }))
             StatTile(title: "平均每日（有資料的日子）", value: settings.format(average))
             StatTile(title: "最高的一天", value: maxDay.map { settings.format($0.total) } ?? "—", detail: maxDay?.label)
-            StatTile(title: "超過額度的天數", value: "\(over) 天", tint: over > 0 ? .red : .green)
+            StatTile(title: "超過上限的天數", value: quota == nil ? "—" : "\(over) 天",
+                     detail: quota == nil ? "選擇有設定上限的網路" : nil, tint: quota == nil ? .primary : (over > 0 ? .red : .green))
         }
     }
 
@@ -103,8 +120,8 @@ struct HistoryView: View {
                         yEnd: .value("用量", segment.high / settings.bytesPerGB))
                     .foregroundStyle(by: .value("類別", segment.kind))
             }
-            if grouping == .day {
-                RuleMark(y: .value("上限", collector.quota / settings.bytesPerGB))
+            if grouping == .day, let quota {
+                RuleMark(y: .value("上限", quota / settings.bytesPerGB))
                     .foregroundStyle(.red.opacity(0.7))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
             }
@@ -125,13 +142,13 @@ struct HistoryView: View {
     private var table: some View {
         Table(rows.reversed()) {
             TableColumn(grouping == .day ? "日期" : "期間") { row in
-                Text(row.label).foregroundStyle(grouping == .day && row.total > collector.quota ? .red : .primary)
+                Text(row.label).foregroundStyle(isOver(row) ? .red : .primary)
             }
             TableColumn("下載") { Text(settings.format($0.rx)).monospacedDigit() }
             TableColumn("上傳") { Text(settings.format($0.tx)).monospacedDigit() }
             TableColumn("合計") { row in
                 Text(settings.format(row.total)).monospacedDigit()
-                    .foregroundStyle(grouping == .day && row.total > collector.quota ? .red : .primary)
+                    .foregroundStyle(isOver(row) ? .red : .primary)
             }
             TableColumn("下載峰值") { Text(settings.formatRate($0.peakRx)).monospacedDigit() }
             TableColumn("上傳峰值") { Text(settings.formatRate($0.peakTx)).monospacedDigit() }
@@ -146,11 +163,13 @@ struct HistoryView: View {
         // 從第一筆紀錄開始，不列出安裝前的空白日子。
         let earliest = policy.dayStart(containing: collector.store.firstRecord() ?? now)
         let from = max(earliest, policy.dayStart(containing: now.addingTimeInterval(-Double(span.rawValue - 1) * 86_400)))
-        var summaries = collector.store.dailySummaries(from: from, to: now, policy: policy)
+        let filter = network.isEmpty ? nil : network
+        var summaries = collector.store.dailySummaries(from: from, to: now, policy: policy, network: filter)
         // 今天用即時數字（包含還沒寫進資料庫的部分）。
         if let index = summaries.firstIndex(where: { $0.day == collector.dayKey }) {
-            summaries[index].bytes = collector.today
-            summaries[index].calibration = collector.calibration
+            summaries[index].bytes = filter.map { collector.todayByNetwork[$0] ?? .zero } ?? collector.today
+            summaries[index].calibration = filter.map { collector.calibrations[$0] ?? 0 }
+                ?? collector.calibrations.values.reduce(0, +)
             summaries[index].peak = collector.peak
         }
 

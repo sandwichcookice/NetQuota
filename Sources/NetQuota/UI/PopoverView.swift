@@ -14,12 +14,12 @@ struct PopoverView: View {
             HStack(alignment: .center, spacing: 16) {
                 UsageRing(fraction: collector.fraction,
                           usedText: settings.format(collector.used),
-                          quotaText: settings.format(collector.quota))
+                          quotaText: collector.quota.map { settings.format($0) })
                     .frame(width: 118, height: 118)
                 VStack(alignment: .leading, spacing: 6) {
-                    labeled("arrow.down", UsageColor.download, "下載", settings.format(collector.today.rx))
-                    labeled("arrow.up", UsageColor.upload, "上傳", settings.format(collector.today.tx))
-                    labeled("gauge.with.needle", .secondary, "剩餘", settings.format(collector.remaining))
+                    labeled("arrow.down", UsageColor.download, "下載", settings.format(collector.focusBytes.rx))
+                    labeled("arrow.up", UsageColor.upload, "上傳", settings.format(collector.focusBytes.tx))
+                    labeled("gauge.with.needle", .secondary, "剩餘", collector.remaining.map { settings.format($0) } ?? "不限制")
                     if collector.calibration != 0 {
                         Text("含手動校正 \(settings.format(collector.calibration))")
                             .font(.caption2).foregroundStyle(.secondary)
@@ -27,6 +27,7 @@ struct PopoverView: View {
                 }
             }
             forecastBox
+            networksSection
             speedSection
             Divider()
             topApps
@@ -38,11 +39,35 @@ struct PopoverView: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("今日用量").font(.headline)
+        HStack(spacing: 6) {
+            Image(systemName: collector.currentNetwork == nil ? "wifi.slash" : NetworkIcon.symbol(for: collector.currentNetwork?.interface))
+                .foregroundStyle(.secondary)
+            Text(collector.focusName).font(.headline).lineLimit(1)
+            if collector.currentNetwork == nil {
+                Text("未連線").font(.caption).foregroundStyle(.secondary)
+            }
             Spacer()
-            Text("\(collector.dayStart.shortTime) 起算")
+            Text("今日 · \(collector.dayStart.shortTime) 起算")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// 今天用過的其他網路，以及全部合計。
+    @ViewBuilder
+    private var networksSection: some View {
+        let others = collector.networkUsages.filter { !$0.isCurrent }
+        if !others.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(others) { usage in
+                    NetworkUsageRow(usage: usage, format: { settings.format($0) })
+                }
+                HStack {
+                    Text("全部網路合計").foregroundStyle(.secondary)
+                    Spacer()
+                    Text(settings.format(collector.totalUsed)).monospacedDigit()
+                }
+                .font(.caption)
+            }
         }
     }
 
@@ -59,9 +84,11 @@ struct PopoverView: View {
     @ViewBuilder
     private var forecastBox: some View {
         let used = collector.used
-        let quota = collector.quota
         Group {
-            if used >= quota {
+            if collector.quota == nil {
+                Label("這個網路沒有設定上限，可在設定 → 網路裡設定", systemImage: "infinity")
+                    .foregroundStyle(.secondary)
+            } else if let quota = collector.quota, used >= quota {
                 Label("已超過今日額度 \(settings.format(used - quota))", systemImage: "xmark.octagon.fill")
                     .foregroundStyle(.red)
             } else if let forecast = collector.forecast {

@@ -10,11 +10,30 @@ struct RatePoint: Identifiable {
     var id: Date { date }
 }
 
-/// 每 2 秒讀一次介面計數器、接收 nettop 的各程式增量，彙總後每分鐘寫入資料庫。
+/// 今天某個網路的用量摘要。
+struct NetworkUsage: Identifiable {
+    let network: NetworkRecord
+    let bytes: ByteCounts
+    let calibration: Double
+    let isCurrent: Bool
+
+    var id: String { network.id }
+    var used: Double { max(0, Double(bytes.total) + calibration) }
+    var quota: Double? { network.quotaBytes }
+    var fraction: Double? { quota.map { $0 > 0 ? used / $0 : 0 } }
+}
+
+/// 每 2 秒讀一次介面計數器、接收 nettop 的各程式增量，依目前所在的網路分開累計，每分鐘寫入資料庫。
 @MainActor
 final class TrafficCollector: ObservableObject {
+    /// 今天所有網路合計。
     @Published private(set) var today = ByteCounts.zero
-    @Published private(set) var calibration: Double = 0
+    @Published private(set) var todayByNetwork: [String: ByteCounts] = [:]
+    @Published private(set) var calibrations: [String: Double] = [:]
+    @Published private(set) var networks: [NetworkRecord] = []
+    @Published private(set) var currentNetwork: NetworkInfo?
+    /// 選單列、圓環、預測所針對的網路：目前所在的網路；離線時沿用最後一個。
+    @Published private(set) var focusNetworkID: String?
     @Published private(set) var rxRate: Double = 0
     @Published private(set) var txRate: Double = 0
     @Published private(set) var peak = DayPeak()
@@ -30,6 +49,7 @@ final class TrafficCollector: ObservableObject {
 
     let store: TrafficStore
     let settings: AppSettings
+    let wifi = WiFiNameProvider()
     private let alerts: AlertManager
     private let monitor = ProcessMonitor(interval: 3)
     private let resolver = AppResolver()
@@ -38,23 +58,51 @@ final class TrafficCollector: ObservableObject {
     private var lastSample: Date?
     private var startedAt = Date()
     private var bootTime: Int64 = 0
-    private var pendingMinute: (date: Date, record: MinuteRecord, interfaces: [String: UInt64])?
+    private var pendingMinute: (date: Date, record: MinuteRecord, interfaces: [String: UInt64],
+                                networks: [String: ByteCounts])?
     /// 依分鐘分組的各程式增量；寫入時同時更新 minute_app 與 hour_app。
     private var pendingApps: [Date: [String: ByteCounts]] = [:]
+    /// 尚未寫入的原始樣本，和每分鐘的彙總一起批次寫入。
+    private var pendingSamples: [TotalSample] = []
+    private var pendingAppSamples: [AppSample] = []
     private var appTotals: [String: ByteCounts] = [:]
     private var appPaths: [String: String] = [:]
-    private var forecastWindow: [(date: Date, bytes: UInt64)] = []
+    private var forecastWindow: [(date: Date, bytes: UInt64, network: String?)] = []
     private var spikeWindow: [String: [(date: Date, bytes: UInt64)]] = [:]
     private var lastResolverPrune = Date()
-    private var timer: Timer?
+    private var lastRoute: (interface: String, router: String)?
+    private var timers: [Timer] = []
     private var cancellables: Set<AnyCancellable> = []
 
     private static let forecastSpan: TimeInterval = 30 * 60
 
-    var used: Double { Double(today.total) + calibration }
-    var quota: Double { settings.policy.quotaBytes }
-    var remaining: Double { max(0, quota - used) }
-    var fraction: Double { quota > 0 ? used / quota : 0 }
+    // MARK: - 給介面用的數值（針對目前的網路）
+
+    var focusNetwork: NetworkRecord? { networks.first { $0.id == focusNetworkID } }
+    var focusName: String { focusNetwork?.displayName ?? "未連線" }
+    var calibration: Double { focusNetworkID.flatMap { calibrations[$0] } ?? 0 }
+    var focusBytes: ByteCounts { focusNetworkID.flatMap { todayByNetwork[$0] } ?? .zero }
+    var used: Double { max(0, Double(focusBytes.total) + calibration) }
+    var quota: Double? { focusNetwork?.quotaBytes }
+    var remaining: Double? { quota.map { max(0, $0 - used) } }
+    var fraction: Double { quota.map { $0 > 0 ? used / $0 : 0 } ?? 0 }
+    var totalUsed: Double { max(0, Double(today.total) + calibrations.values.reduce(0, +)) }
+
+    /// 今天有用量、有設上限、或目前所在的網路。
+    var networkUsages: [NetworkUsage] {
+        networks.compactMap { network in
+            let bytes = todayByNetwork[network.id] ?? .zero
+            let isCurrent = network.id == focusNetworkID
+            guard !bytes.isZero || network.quotaBytes != nil || isCurrent else { return nil }
+            return NetworkUsage(network: network, bytes: bytes, calibration: calibrations[network.id] ?? 0,
+                                isCurrent: isCurrent)
+        }
+        .sorted { ($0.isCurrent ? 1 : 0, $0.used) > ($1.isCurrent ? 1 : 0, $1.used) }
+    }
+
+    func usage(for id: String) -> Double {
+        max(0, Double((todayByNetwork[id] ?? .zero).total) + (calibrations[id] ?? 0))
+    }
 
     init(store: TrafficStore, settings: AppSettings) {
         self.store = store
@@ -64,22 +112,24 @@ final class TrafficCollector: ObservableObject {
 
     func start() {
         appPaths = store.appPaths()
+        networks = store.networks()
+        focusNetworkID = store.state("focusNetwork")
         bootTime = InterfaceCounter.bootTime()
         startedAt = Date()
+        refreshNetwork()
         recoverGap()
         reloadToday()
 
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        timer.tolerance = 0.3
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        schedule(every: 2) { $0.tick() }
+        schedule(every: 10) { $0.refreshNetwork() }
 
         monitor.onSample = { [weak self] samples in
             Task { @MainActor in self?.ingest(samples) }
         }
         monitor.start()
+
+        wifi.onAuthorizationChange = { [weak self] in self?.refreshNetwork(force: true) }
+        wifi.requestIfNeeded()
 
         settings.$resetHour.dropFirst().sink { [weak self] _ in
             Task { @MainActor in
@@ -101,19 +151,85 @@ final class TrafficCollector: ObservableObject {
         }
     }
 
-    // MARK: - 校正
+    private func schedule(every interval: TimeInterval, _ action: @escaping (TrafficCollector) -> Void) {
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                if let self { action(self) }
+            }
+        }
+        timer.tolerance = interval * 0.15
+        RunLoop.main.add(timer, forMode: .common)
+        timers.append(timer)
+    }
 
-    /// 把今日已用量校正成 `gb`（例如對齊宿舍系統顯示的數字）。
-    func calibrate(toUsedGB gb: Double) {
-        calibration = gb * settings.bytesPerGB - Double(today.total)
-        try? store.setCalibration(day: dayKey, bytes: calibration)
+    // MARK: - 網路設定
+
+    /// 把某個網路今日已用量校正成 `gb`（例如對齊宿舍系統顯示的數字）。
+    func calibrate(network id: String, toUsedGB gb: Double) {
+        let value = gb * settings.bytesPerGB - Double((todayByNetwork[id] ?? .zero).total)
+        calibrations[id] = value
+        try? store.setCalibration(day: dayKey, network: id, bytes: value)
         dataVersion += 1
     }
 
-    func clearCalibration() {
-        calibration = 0
-        try? store.setCalibration(day: dayKey, bytes: 0)
+    func clearCalibration(network id: String) {
+        calibrations[id] = nil
+        try? store.setCalibration(day: dayKey, network: id, bytes: 0)
         dataVersion += 1
+    }
+
+    /// 設定某個網路的每日上限；nil 代表不限制。
+    func setQuota(network id: String, gb: Double?) {
+        try? store.setNetworkQuota(id, bytes: gb.map { $0 * settings.bytesPerGB })
+        networks = store.networks()
+        updateForecast(now: Date())
+        dataVersion += 1
+    }
+
+    func setLabel(network id: String, _ label: String) {
+        try? store.setNetworkLabel(id, label)
+        networks = store.networks()
+    }
+
+    // MARK: - 網路偵測
+
+    /// 讀目前的預設路由；換了網路才查路由器位址（arp）與 Wi-Fi 名稱。
+    func refreshNetwork(force: Bool = false) {
+        guard let route = NetworkProbe.primaryRoute() else {
+            if currentNetwork != nil { currentNetwork = nil }
+            lastRoute = nil
+            return
+        }
+        let changed = lastRoute.map { $0.interface != route.interface || $0.router != route.router } ?? true
+        let missingName = currentNetwork != nil && currentNetwork?.ssid == nil && wifi.isAuthorized
+        guard changed || force || missingName || currentNetwork == nil else { return }
+
+        let mac = NetworkProbe.macAddress(of: route.router)
+        var info = NetworkInfo(id: NetworkProbe.networkID(router: route.router, mac: mac, interface: route.interface),
+                               interface: route.interface, router: route.router, routerMAC: mac)
+        info.ssid = wifi.ssid(for: route.interface)
+        lastRoute = route
+
+        let isNew = currentNetwork?.id != info.id
+        if isNew || currentNetwork?.ssid != info.ssid {
+            try? store.upsertNetwork(info)
+            // 升級前的舊資料（沒有網路資訊）歸到第一個偵測到的網路，並套用舊版的單一上限。
+            if (try? store.backfillUnassigned(to: info.id,
+                                               legacyQuotaBytes: settings.quotaGB * settings.bytesPerGB)) == true {
+                reloadToday()
+            }
+            networks = store.networks()
+        }
+        if isNew {
+            // 換網路前的那一段先寫進資料庫，歸給原本的網路。
+            flush()
+            currentNetwork = info
+            focusNetworkID = info.id
+            try? store.setState("focusNetwork", info.id)
+            updateForecast(now: Date())
+        } else {
+            currentNetwork = info
+        }
     }
 
     // MARK: - 取樣
@@ -147,27 +263,40 @@ final class TrafficCollector: ObservableObject {
             recentRates.append(RatePoint(date: now, rx: rxRate, tx: txRate))
             if recentRates.count > 90 { recentRates.removeFirst(recentRates.count - 90) }
         }
+        let network = currentNetwork?.id
+        pendingSamples.append(TotalSample(time: now, dt: dt, bytes: delta, awake: awake, network: network,
+                                          interfaces: perInterface.filter { !$0.value.isZero }))
         add(MinuteRecord(bytes: delta, peakRx: awake ? rxRate : 0, peakTx: awake ? txRate : 0,
                          observedSeconds: awake ? dt : 2),
-            interfaces: perInterface, at: now)
+            interfaces: perInterface, network: network, at: now)
         lastRaw = raw
         lastSample = now
 
-        forecastWindow.append((now, delta.total))
+        forecastWindow.append((now, delta.total, network))
         let cutoff = now.addingTimeInterval(-Self.forecastSpan)
         if let index = forecastWindow.firstIndex(where: { $0.date > cutoff }), index > 0 {
             forecastWindow.removeFirst(index)
         }
         updateForecast(now: now)
-        alerts.checkQuota(day: dayKey, used: used, quota: quota, forecast: forecast)
+        checkAlerts()
     }
 
-    private func add(_ sample: MinuteRecord, interfaces: [String: ByteCounts], at now: Date) {
+    private func checkAlerts() {
+        for network in networks {
+            guard let quota = network.quotaBytes else { continue }
+            let used = usage(for: network.id)
+            guard used > 0 else { continue }
+            alerts.checkQuota(day: dayKey, network: network.id, name: network.displayName, used: used, quota: quota,
+                              forecast: network.id == focusNetworkID ? forecast : nil)
+        }
+    }
+
+    private func add(_ sample: MinuteRecord, interfaces: [String: ByteCounts], network: String?, at now: Date) {
         let minute = Self.minuteStart(now)
         if let pending = pendingMinute, pending.date != minute {
             flush()
         }
-        var entry = pendingMinute ?? (minute, MinuteRecord(), [:])
+        var entry = pendingMinute ?? (minute, MinuteRecord(), [:], [:])
         entry.record.bytes += sample.bytes
         entry.record.peakRx = max(entry.record.peakRx, sample.peakRx)
         entry.record.peakTx = max(entry.record.peakTx, sample.peakTx)
@@ -176,6 +305,11 @@ final class TrafficCollector: ObservableObject {
             entry.interfaces[name, default: 0] += bytes.total
         }
         entry.record.interface = entry.interfaces.max { $0.value < $1.value }?.key
+        if let network, !sample.bytes.isZero {
+            entry.networks[network, default: .zero] += sample.bytes
+            todayByNetwork[network, default: .zero] += sample.bytes
+        }
+        entry.record.network = entry.networks.max { $0.value.total < $1.value.total }?.key ?? network
         pendingMinute = entry
         today += sample.bytes
     }
@@ -193,6 +327,8 @@ final class TrafficCollector: ObservableObject {
         for sample in samples {
             let identity = resolver.resolve(pid: sample.pid, fallbackName: sample.name)
             let name = identity.name
+            pendingAppSamples.append(AppSample(time: now, app: name, pid: sample.pid, bytes: sample.bytes,
+                                               network: currentNetwork?.id))
             appTotals[name, default: .zero] += sample.bytes
             pendingApps[minute, default: [:]][name, default: .zero] += sample.bytes
             spikeWindow[name, default: []].append((now, sample.bytes.total))
@@ -223,9 +359,14 @@ final class TrafficCollector: ObservableObject {
             .sorted { $0.bytes.total > $1.bytes.total }
     }
 
+    /// 只針對目前網路：用它最近 30 分鐘的速率推估，沒有上限的網路不預測。
     private func updateForecast(now: Date) {
+        guard let quota, let focusNetworkID else {
+            forecast = nil
+            return
+        }
         let span = min(Self.forecastSpan, now.timeIntervalSince(startedAt))
-        let recent = forecastWindow.reduce(0.0) { $0 + Double($1.bytes) }
+        let recent = forecastWindow.reduce(0.0) { $0 + ($1.network == focusNetworkID ? Double($1.bytes) : 0) }
         forecast = Forecast.make(used: used, quota: quota, recentBytes: recent, window: span, now: now, dayEnd: dayEnd)
     }
 
@@ -237,6 +378,15 @@ final class TrafficCollector: ObservableObject {
             try store.transaction {
                 if let pending = pendingMinute {
                     try store.addMinute(at: pending.date, pending.record)
+                    for (network, bytes) in pending.networks {
+                        try store.addNetworkMinute(at: pending.date, network: network, bytes)
+                    }
+                }
+                for sample in pendingSamples {
+                    try store.addSample(sample)
+                }
+                for sample in pendingAppSamples {
+                    try store.addAppSample(sample)
                 }
                 for (minute, apps) in pendingApps {
                     for (app, bytes) in apps {
@@ -251,6 +401,8 @@ final class TrafficCollector: ObservableObject {
             }
             pendingMinute = nil
             pendingApps = [:]
+            pendingSamples = []
+            pendingAppSamples = []
             dataVersion += 1
         } catch {
             NSLog("NetQuota: 寫入資料庫失敗：\(error)")
@@ -263,7 +415,8 @@ final class TrafficCollector: ObservableObject {
         dayEnd = policy.dayEnd(containing: now)
         dayKey = policy.dayKey(for: now)
         today = store.totals(from: dayStart, to: dayEnd)
-        calibration = store.calibration(day: dayKey)
+        todayByNetwork = store.networkTotals(from: dayStart, to: dayEnd)
+        calibrations = store.calibrations(day: dayKey)
         peak = store.peak(day: dayKey) ?? DayPeak()
         appTotals = Dictionary(store.appTotals(from: dayStart, to: dayEnd).map { ($0.name, $0.bytes) },
                                uniquingKeysWith: +)
@@ -276,15 +429,16 @@ final class TrafficCollector: ObservableObject {
         var boot: Int64
         var time: Date
         var raw: [String: ByteCounts]
+        var network: String?
     }
 
     private func saveSnapshot(raw: [String: ByteCounts], at time: Date) throws {
         guard !raw.isEmpty else { return }
-        let data = try JSONEncoder().encode(Snapshot(boot: bootTime, time: time, raw: raw))
-        try store.setState("snapshot", String(decoding: data, as: UTF8.self))
+        let snapshot = Snapshot(boot: bootTime, time: time, raw: raw, network: currentNetwork?.id ?? focusNetworkID)
+        try store.setState("snapshot", String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self))
     }
 
-    /// App 沒在執行的期間，介面計數器仍持續累加，用上次的快照把差額補回來。
+    /// App 沒在執行的期間，介面計數器仍持續累加，用上次的快照把差額補回來，歸給當時所在的網路。
     private func recoverGap() {
         let now = Date()
         let raw = InterfaceCounter.read()
@@ -310,11 +464,16 @@ final class TrafficCollector: ObservableObject {
             bytes = CounterMath.sum(raw)
         }
         guard from < now else { return }
+        // 關閉前在哪個網路就歸給哪個；舊版快照沒有記錄時，用目前的網路。
+        let network = snapshot.network ?? currentNetwork?.id
 
         do {
             try store.transaction {
                 for segment in settings.policy.split(bytes, from: from, to: now) {
-                    try store.addMinute(at: segment.start, segment.bytes, recovered: true)
+                    try store.addMinute(at: segment.start, MinuteRecord(bytes: segment.bytes, recovered: true, network: network))
+                    if let network {
+                        try store.addNetworkMinute(at: segment.start, network: network, segment.bytes)
+                    }
                 }
                 try saveSnapshot(raw: raw, at: now)
             }

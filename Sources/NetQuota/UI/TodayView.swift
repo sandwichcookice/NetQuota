@@ -23,55 +23,119 @@ struct TodayView: View {
         var id: String { "\(direction)-\(date.timeIntervalSince1970)" }
     }
 
+    /// 要看的網路：空字串 = 目前的網路，`allNetworks` = 全部合計，其他為網路 id。
+    @State private var selection = ""
     @State private var cumulative: [CumulativePoint] = []
     @State private var bars: [BarPoint] = []
 
+    private static let allNetworks = "*"
     private static let barMinutes = 15
 
+    /// 目前選擇的範圍算出來的數字。
+    private struct Scope {
+        var name: String
+        var bytes: ByteCounts
+        var calibration: Double
+        var quota: Double?
+        var forecast: Forecast?
+        var networkID: String?
+
+        var used: Double { max(0, Double(bytes.total) + calibration) }
+        var remaining: Double? { quota.map { max(0, $0 - used) } }
+        var fraction: Double { quota.map { $0 > 0 ? used / $0 : 0 } ?? 0 }
+    }
+
+    private var scope: Scope {
+        if selection == Self.allNetworks {
+            return Scope(name: "全部網路", bytes: collector.today,
+                         calibration: collector.calibrations.values.reduce(0, +), quota: nil, forecast: nil, networkID: nil)
+        }
+        let id = selection.isEmpty ? collector.focusNetworkID : selection
+        let network = collector.networks.first { $0.id == id }
+        return Scope(name: network?.displayName ?? "未連線",
+                     bytes: id.flatMap { collector.todayByNetwork[$0] } ?? .zero,
+                     calibration: id.flatMap { collector.calibrations[$0] } ?? 0,
+                     quota: network?.quotaBytes,
+                     forecast: id == collector.focusNetworkID ? collector.forecast : nil,
+                     networkID: id)
+    }
+
     var body: some View {
+        let scope = scope
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                tiles
+                networkPicker
+                tiles(scope)
+                if collector.networkUsages.count > 1 {
+                    section("今日各網路") {
+                        VStack(spacing: 8) {
+                            ForEach(collector.networkUsages) { usage in
+                                NetworkUsageRow(usage: usage, format: { settings.format($0) })
+                            }
+                        }
+                    }
+                }
                 if let note = collector.recoveredNote {
                     Label(note, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
                 }
-                section("累積用量（虛線為依目前速度的預測）") { cumulativeChart.frame(height: 220) }
+                section("累積用量（虛線為依目前速度的預測）") { cumulativeChart(scope).frame(height: 220) }
                 section("每 \(Self.barMinutes) 分鐘用量") { barChart.frame(height: 170) }
             }
             .padding(20)
         }
-        .task(id: collector.dataVersion) { reload() }
+        .task(id: "\(collector.dataVersion)-\(selection)-\(collector.focusNetworkID ?? "")") { reload() }
     }
 
-    private var tiles: some View {
+    private var networkPicker: some View {
+        HStack {
+            Picker("網路", selection: $selection) {
+                Text("目前網路（\(collector.focusName)）").tag("")
+                Text("全部網路").tag(Self.allNetworks)
+                Divider()
+                ForEach(collector.networks.filter { $0.id != collector.focusNetworkID }) { network in
+                    Text(network.displayName).tag(network.id)
+                }
+            }
+            .fixedSize()
+            Spacer()
+        }
+    }
+
+    private func tiles(_ scope: Scope) -> some View {
         let peak = collector.peak
         return VStack(spacing: 10) {
             HStack(spacing: 10) {
-                StatTile(title: "今日已用", value: settings.format(collector.used),
-                         detail: "\(Int((collector.fraction * 100).rounded()))%（上限 \(settings.format(collector.quota))）",
-                         tint: UsageColor.forFraction(collector.fraction))
-                StatTile(title: "剩餘", value: settings.format(collector.remaining),
+                StatTile(title: "今日已用", value: settings.format(scope.used),
+                         detail: scope.quota.map { "\(Int((scope.fraction * 100).rounded()))%（上限 \(settings.format($0))）" }
+                             ?? "未設定上限",
+                         tint: scope.quota == nil ? .primary : UsageColor.forFraction(scope.fraction))
+                StatTile(title: "剩餘", value: scope.remaining.map { settings.format($0) } ?? "不限制",
                          detail: "\(collector.dayEnd.shortTime) 歸零")
-                StatTile(title: "下載", value: settings.format(collector.today.rx), tint: UsageColor.download)
-                StatTile(title: "上傳", value: settings.format(collector.today.tx), tint: UsageColor.upload)
+                StatTile(title: "下載", value: settings.format(scope.bytes.rx), tint: UsageColor.download)
+                StatTile(title: "上傳", value: settings.format(scope.bytes.tx), tint: UsageColor.upload)
             }
             HStack(spacing: 10) {
+                // 峰值為所有網路合計的速率。
                 StatTile(title: "下載峰值", value: settings.formatRate(peak.rxRate), detail: peak.rxAt.map { "於 \($0.shortTime)" })
                 StatTile(title: "上傳峰值", value: settings.formatRate(peak.txRate), detail: peak.txAt.map { "於 \($0.shortTime)" })
-                StatTile(title: "預估今日總量", value: collector.forecast.map { settings.format($0.projectedTotal) } ?? "—",
-                         detail: collector.forecast.map { "近期 \(settings.formatRate($0.rate))" },
-                         tint: (collector.forecast?.projectedTotal ?? 0) > collector.quota ? .orange : .primary)
-                exhaustTile
+                StatTile(title: "預估今日總量", value: scope.forecast.map { settings.format($0.projectedTotal) } ?? "—",
+                         detail: scope.forecast.map { "近期 \(settings.formatRate($0.rate))" },
+                         tint: (scope.forecast?.projectedTotal ?? 0) > (scope.quota ?? .infinity) ? .orange : .primary)
+                exhaustTile(scope)
             }
         }
     }
 
-    private var exhaustTile: StatTile {
-        if collector.used >= collector.quota {
+    private func exhaustTile(_ scope: Scope) -> StatTile {
+        guard let quota = scope.quota else {
+            return StatTile(title: "預計用完", value: "—", detail: "沒有設定上限")
+        }
+        if scope.used >= quota {
             return StatTile(title: "預計用完", value: "已超過", tint: .red)
         }
-        guard let forecast = collector.forecast else {
-            return StatTile(title: "預計用完", value: "—", detail: "收集約 2 分鐘資料後顯示")
+        guard let forecast = scope.forecast else {
+            return StatTile(title: "預計用完", value: "—",
+                            detail: scope.networkID == collector.focusNetworkID ? "收集約 2 分鐘資料後顯示" : "只預測目前所在的網路")
         }
         if let exceedAt = forecast.exceedAt {
             return StatTile(title: "預計用完", value: exceedAt.shortTime, detail: "照目前速度", tint: .red)
@@ -79,7 +143,7 @@ struct TodayView: View {
         return StatTile(title: "預計用完", value: "今天不會", detail: "照目前速度", tint: .green)
     }
 
-    private var cumulativeChart: some View {
+    private func cumulativeChart(_ scope: Scope) -> some View {
         Chart {
             ForEach(cumulative) { point in
                 LineMark(x: .value("時間", point.date), y: .value("用量", point.value / settings.bytesPerGB),
@@ -87,12 +151,14 @@ struct TodayView: View {
                     .foregroundStyle(point.series == "實際" ? Color.accentColor : Color.orange)
                     .lineStyle(point.series == "實際" ? StrokeStyle(lineWidth: 2) : StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
             }
-            RuleMark(y: .value("上限", collector.quota / settings.bytesPerGB))
-                .foregroundStyle(.red.opacity(0.7))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                .annotation(position: .top, alignment: .leading) {
-                    Text("上限 \(settings.format(collector.quota))").font(.caption2).foregroundStyle(.red)
-                }
+            if let quota = scope.quota {
+                RuleMark(y: .value("上限", quota / settings.bytesPerGB))
+                    .foregroundStyle(.red.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(position: .top, alignment: .leading) {
+                        Text("上限 \(settings.format(quota))").font(.caption2).foregroundStyle(.red)
+                    }
+            }
         }
         .chartXScale(domain: collector.dayStart...collector.dayEnd)
         .chartYAxisLabel(settings.binaryUnits ? "GiB" : "GB")
@@ -131,18 +197,21 @@ struct TodayView: View {
 
     private func reload() {
         let now = Date()
-        let minutes = collector.store.minuteTotals(from: collector.dayStart, to: collector.dayEnd)
+        let scope = scope
+        let minutes = scope.networkID.map {
+            collector.store.minuteTotals(from: collector.dayStart, to: collector.dayEnd, network: $0)
+        } ?? collector.store.minuteTotals(from: collector.dayStart, to: collector.dayEnd)
 
-        var running = collector.calibration
+        var running = scope.calibration
         var points = [CumulativePoint(date: collector.dayStart, value: max(0, running), series: "實際")]
         for row in minutes {
             running += Double(row.bytes.total)
             points.append(CumulativePoint(date: row.date.addingTimeInterval(60), value: max(0, running), series: "實際"))
         }
         // 最後一點用即時數字，包含尚未寫入資料庫的這一分鐘。
-        points.append(CumulativePoint(date: now, value: collector.used, series: "實際"))
-        if let forecast = collector.forecast {
-            points.append(CumulativePoint(date: now, value: collector.used, series: "預測"))
+        points.append(CumulativePoint(date: now, value: scope.used, series: "實際"))
+        if let forecast = scope.forecast {
+            points.append(CumulativePoint(date: now, value: scope.used, series: "預測"))
             points.append(CumulativePoint(date: collector.dayEnd, value: forecast.projectedTotal, series: "預測"))
         }
         cumulative = points

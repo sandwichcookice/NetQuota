@@ -42,15 +42,18 @@ public struct MinuteRecord: Equatable, Sendable {
     public var recovered: Bool
     /// 這一分鐘流量最多的介面（例如 en0）。
     public var interface: String?
+    /// 這一分鐘流量最多的網路（networks.id）。各網路的精確分配在 minute_network。
+    public var network: String?
 
     public init(bytes: ByteCounts = .zero, peakRx: Double = 0, peakTx: Double = 0, observedSeconds: Double = 0,
-                recovered: Bool = false, interface: String? = nil) {
+                recovered: Bool = false, interface: String? = nil, network: String? = nil) {
         self.bytes = bytes
         self.peakRx = peakRx
         self.peakTx = peakTx
         self.observedSeconds = observedSeconds
         self.recovered = recovered
         self.interface = interface
+        self.network = network
     }
 }
 
@@ -72,11 +75,14 @@ public struct DaySummary: Identifiable, Equatable, Sendable {
 /// - `minute_total`：每分鐘的總量（介面計數器）與特徵（峰值、監測秒數、補算旗標、介面）。每日總量由此依目前的重置時間彙總。
 /// - `minute_app`：每分鐘、每個程式的用量（schema v1 起）。
 /// - `hour_app`：每小時、每個程式的用量（給介面快速查詢）。
+/// - `minute_network`：每分鐘、每個網路的用量（schema v2 起），各網路的額度由此計算。
+/// - `networks`：看過的網路（路由器位址、Wi-Fi 名稱、自訂名稱、每日上限）。
+/// - `sample_total`、`sample_app`：每次取樣的原始資料（schema v3 起）。
 /// - `peak`：每天的峰值速率。
-/// - `calibration`：每天的手動校正量。
+/// - `network_calibration`：每天、每個網路的手動校正量（`calibration` 為 v2 之前的舊表）。
 /// - `state`：鍵值設定（例如上次的計數器快照）。
 public final class TrafficStore {
-    private let db: SQLiteDB
+    let db: SQLiteDB
 
     public init(path: String) throws {
         db = try SQLiteDB(path: path)
@@ -92,7 +98,7 @@ public final class TrafficStore {
         try migrate()
     }
 
-    public static let schemaVersion: Int64 = 1
+    public static let schemaVersion: Int64 = 3
 
     private func migrate() throws {
         var version: Int64 = 0
@@ -117,6 +123,35 @@ public final class TrafficStore {
                     CREATE TABLE IF NOT EXISTS minute_app (ts INTEGER NOT NULL, app TEXT NOT NULL,
                         rx INTEGER NOT NULL, tx INTEGER NOT NULL, PRIMARY KEY (ts, app)) WITHOUT ROWID;
                     PRAGMA user_version = 1;
+                    """)
+            }
+        }
+        if version < 2 {
+            try db.transaction {
+                // v2：依網路分開記錄。舊資料在第一次偵測到網路時歸到那個網路（見 backfillUnassigned）。
+                try db.exec("""
+                    CREATE TABLE IF NOT EXISTS networks (id TEXT PRIMARY KEY, label TEXT, ssid TEXT, iface TEXT, router TEXT,
+                        quota_bytes REAL, first_seen REAL NOT NULL, last_seen REAL NOT NULL);
+                    CREATE TABLE IF NOT EXISTS minute_network (ts INTEGER NOT NULL, network TEXT NOT NULL,
+                        rx INTEGER NOT NULL, tx INTEGER NOT NULL, PRIMARY KEY (ts, network)) WITHOUT ROWID;
+                    CREATE TABLE IF NOT EXISTS network_calibration (day TEXT NOT NULL, network TEXT NOT NULL,
+                        bytes REAL NOT NULL, PRIMARY KEY (day, network));
+                    ALTER TABLE minute_total ADD COLUMN network TEXT;
+                    INSERT OR REPLACE INTO state (key, value) VALUES ('pendingNetworkBackfill', '1');
+                    PRAGMA user_version = 2;
+                    """)
+            }
+        }
+        if version < 3 {
+            try db.transaction {
+                // v3：每次取樣的原始資料（總量約每 2 秒、各程式約每 3 秒一筆），從這個版本開始記錄。
+                try db.exec("""
+                    CREATE TABLE IF NOT EXISTS sample_total (ts REAL PRIMARY KEY, dt REAL NOT NULL,
+                        rx INTEGER NOT NULL, tx INTEGER NOT NULL, awake INTEGER NOT NULL, network TEXT, ifaces TEXT);
+                    CREATE TABLE IF NOT EXISTS sample_app (ts REAL NOT NULL, app TEXT NOT NULL, pid INTEGER NOT NULL,
+                        rx INTEGER NOT NULL, tx INTEGER NOT NULL, network TEXT);
+                    CREATE INDEX IF NOT EXISTS sample_app_ts ON sample_app (ts);
+                    PRAGMA user_version = 3;
                     """)
             }
         }
@@ -147,17 +182,19 @@ public final class TrafficStore {
         guard !record.bytes.isZero || record.observedSeconds > 0 else { return }
         let ts = Int64(date.timeIntervalSince1970) / 60 * 60
         try db.run("""
-            INSERT INTO minute_total (ts, rx, tx, peak_rx, peak_tx, observed_sec, recovered, iface)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO minute_total (ts, rx, tx, peak_rx, peak_tx, observed_sec, recovered, iface, network)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ts) DO UPDATE SET
                 rx = rx + excluded.rx, tx = tx + excluded.tx,
                 peak_rx = MAX(peak_rx, excluded.peak_rx), peak_tx = MAX(peak_tx, excluded.peak_tx),
                 observed_sec = MIN(60, MAX(observed_sec, 0) + excluded.observed_sec),
                 recovered = MAX(recovered, excluded.recovered),
-                iface = COALESCE(excluded.iface, iface)
+                iface = COALESCE(excluded.iface, iface),
+                network = COALESCE(excluded.network, network)
             """, [.int(ts), .int(Int64(record.bytes.rx)), .int(Int64(record.bytes.tx)),
                   .double(record.peakRx), .double(record.peakTx), .double(min(60, record.observedSeconds)),
-                  .int(record.recovered ? 1 : 0), record.interface.map(SQLValue.text) ?? .null])
+                  .int(record.recovered ? 1 : 0), record.interface.map(SQLValue.text) ?? .null,
+                  record.network.map(SQLValue.text) ?? .null])
     }
 
     public func addAppMinute(at date: Date, app: String, _ bytes: ByteCounts) throws {
@@ -190,11 +227,12 @@ public final class TrafficStore {
         ])
     }
 
-    public func setCalibration(day: String, bytes: Double) throws {
+    public func setCalibration(day: String, network: String, bytes: Double) throws {
         if bytes == 0 {
-            try db.run("DELETE FROM calibration WHERE day = ?", [.text(day)])
+            try db.run("DELETE FROM network_calibration WHERE day = ? AND network = ?", [.text(day), .text(network)])
         } else {
-            try db.run("INSERT OR REPLACE INTO calibration (day, bytes) VALUES (?, ?)", [.text(day), .double(bytes)])
+            try db.run("INSERT OR REPLACE INTO network_calibration (day, network, bytes) VALUES (?, ?, ?)",
+                       [.text(day), .text(network), .double(bytes)])
         }
     }
 
@@ -228,10 +266,13 @@ public final class TrafficStore {
         return rows
     }
 
-    public func calibration(day: String) -> Double {
-        var value = 0.0
-        try? db.query("SELECT bytes FROM calibration WHERE day = ?", [.text(day)]) { value = $0.double(0) }
-        return value
+    /// 某天各網路的校正量。
+    public func calibrations(day: String) -> [String: Double] {
+        var result: [String: Double] = [:]
+        try? db.query("SELECT network, bytes FROM network_calibration WHERE day = ?", [.text(day)]) { row in
+            if let network = row.text(0) { result[network] = row.double(1) }
+        }
+        return result
     }
 
     public func peak(day: String) -> DayPeak? {
@@ -262,7 +303,8 @@ public final class TrafficStore {
     }
 
     /// 區間內每天的摘要（依 `policy` 的重置時間切日），由舊到新，沒有資料的日子也會列出。
-    public func dailySummaries(from: Date, to: Date, policy: QuotaPolicy) -> [DaySummary] {
+    /// `network` 為 nil 時是所有網路合計。
+    public func dailySummaries(from: Date, to: Date, policy: QuotaPolicy, network: String? = nil) -> [DaySummary] {
         var buckets: [String: (start: Date, bytes: ByteCounts)] = [:]
         var order: [String] = []
         var cursor = policy.dayStart(containing: from)
@@ -274,18 +316,20 @@ public final class TrafficStore {
         }
         guard let first = order.first, let firstStart = buckets[first]?.start else { return [] }
 
-        try? db.query("""
-            SELECT ts / 3600 * 3600 AS h, SUM(rx), SUM(tx) FROM minute_total
-            WHERE ts >= ? AND ts < ? GROUP BY h
-            """, range(firstStart, to)) { row in
+        let hourly = network == nil
+            ? "SELECT ts / 3600 * 3600 AS h, SUM(rx), SUM(tx) FROM minute_total WHERE ts >= ? AND ts < ? GROUP BY h"
+            : "SELECT ts / 3600 * 3600 AS h, SUM(rx), SUM(tx) FROM minute_network WHERE ts >= ? AND ts < ? AND network = ? GROUP BY h"
+        try? db.query(hourly, range(firstStart, to) + (network.map { [.text($0)] } ?? [])) { row in
             let key = policy.dayKey(for: Date(timeIntervalSince1970: TimeInterval(row.int(0))))
             buckets[key]?.bytes += ByteCounts(rx: UInt64(row.int(1)), tx: UInt64(row.int(2)))
         }
 
         let peaks = peaks(days: order)
         var calibrations: [String: Double] = [:]
-        try? db.query("SELECT day, bytes FROM calibration WHERE day >= ? AND day <= ?",
-                      [.text(first), .text(order.last ?? first)]) { row in
+        let calibrationSQL = network == nil
+            ? "SELECT day, SUM(bytes) FROM network_calibration WHERE day >= ? AND day <= ? GROUP BY day"
+            : "SELECT day, SUM(bytes) FROM network_calibration WHERE day >= ? AND day <= ? AND network = ? GROUP BY day"
+        try? db.query(calibrationSQL, [.text(first), .text(order.last ?? first)] + (network.map { [.text($0)] } ?? [])) { row in
             if let day = row.text(0) { calibrations[day] = row.double(1) }
         }
 
@@ -312,13 +356,13 @@ public final class TrafficStore {
     /// 依時間順序逐筆讀出每分鐘紀錄（匯出用，不會一次載入記憶體）。
     public func forEachMinute(from: Date, to: Date, _ body: (Date, MinuteRecord) -> Void) {
         try? db.query("""
-            SELECT ts, rx, tx, peak_rx, peak_tx, observed_sec, recovered, iface FROM minute_total
+            SELECT ts, rx, tx, peak_rx, peak_tx, observed_sec, recovered, iface, network FROM minute_total
             WHERE ts >= ? AND ts < ? ORDER BY ts
             """, range(from, to)) { row in
             body(Date(timeIntervalSince1970: TimeInterval(row.int(0))),
                  MinuteRecord(bytes: ByteCounts(rx: UInt64(row.int(1)), tx: UInt64(row.int(2))),
                               peakRx: row.double(3), peakTx: row.double(4), observedSeconds: row.double(5),
-                              recovered: row.int(6) != 0, interface: row.text(7)))
+                              recovered: row.int(6) != 0, interface: row.text(7), network: row.text(8)))
         }
     }
 
@@ -358,7 +402,7 @@ public final class TrafficStore {
         return result
     }
 
-    private func range(_ from: Date, _ to: Date) -> [SQLValue] {
+    func range(_ from: Date, _ to: Date) -> [SQLValue] {
         [.int(Int64(from.timeIntervalSince1970.rounded(.down))), .int(Int64(to.timeIntervalSince1970.rounded(.up)))]
     }
 }

@@ -174,7 +174,7 @@ private func date(_ text: String) -> Date {
         try store.addMinute(at: date("2026-11-01 06:00"), ByteCounts(rx: 200, tx: 2))
         try store.addMinute(at: date("2026-11-01 06:00"), ByteCounts(rx: 50, tx: 0))
         try store.addMinute(at: date("2026-11-02 05:00"), ByteCounts(rx: 300, tx: 3))
-        try store.setCalibration(day: "2026-11-01", bytes: 1000)
+        try store.setCalibration(day: "2026-11-01", network: "mac:aa", bytes: 1000)
 
         let days = store.dailySummaries(from: date("2026-10-31 12:00"), to: date("2026-11-02 12:00"), policy: policy)
         #expect(days.map(\.day) == ["2026-10-31", "2026-11-01", "2026-11-02"])
@@ -288,9 +288,9 @@ private func date(_ text: String) -> Date {
         let lines = try String(contentsOf: dir.appendingPathComponent("minutes.csv"), encoding: .utf8)
             .split(separator: "\n").map(String.init)
         #expect(lines.count == 6)
-        #expect(lines[1].hasSuffix(",100,1,0,0,60,0,en0"))
+        #expect(lines[1].hasSuffix(",100,1,0,0,60,0,en0,"))
         #expect(lines[1].contains(",2026-11-02,600,1,"))  // 第 600 分鐘、週一
-        #expect(lines[2].hasSuffix(",0,0,0,0,0,0,"))      // 沒有監測的分鐘
+        #expect(lines[2].hasSuffix(",0,0,0,0,0,0,,"))     // 沒有監測的分鐘
         let apps = try String(contentsOf: dir.appendingPathComponent("app_minutes.csv"), encoding: .utf8)
         #expect(apps.contains("\"Steam, Inc\",90,0"))
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("SCHEMA.md").path))
@@ -304,5 +304,144 @@ private func date(_ text: String) -> Date {
         try store.backup(to: copy)
         let restored = try TrafficStore(path: copy.path)
         #expect(restored.totals(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 10_000)).rx == 42)
+    }
+}
+
+@Suite struct NetworkTests {
+    @Test func parsesARPOutput() {
+        #expect(NetworkProbe.parseARP("? (192.168.50.1) at aa:bb:cc:11:22:33 on en0 ifscope [ethernet]\n") == "aa:bb:cc:11:22:33")
+        // arp 會省略前導 0
+        #expect(NetworkProbe.parseARP("? (10.0.0.1) at 0:1a:2b:3:4c:5d on en5 ifscope [ethernet]") == "00:1a:2b:03:4c:5d")
+        #expect(NetworkProbe.parseARP("? (10.0.0.1) at (incomplete) on en0 ifscope [ethernet]") == nil)
+        #expect(NetworkProbe.networkID(router: "10.0.0.1", mac: "aa:bb:cc:dd:ee:ff", interface: "en0") == "mac:aa:bb:cc:dd:ee:ff")
+        #expect(NetworkProbe.networkID(router: "10.0.0.1", mac: nil, interface: "en5") == "route:en5/10.0.0.1")
+    }
+
+    @Test func perNetworkTotalsQuotaAndLabels() throws {
+        let store = try TrafficStore(path: ":memory:")
+        let policy = QuotaPolicy(quotaBytes: 0, resetHour: 0, calendar: taipei)
+        let dorm = NetworkInfo(id: "mac:aa", interface: "en0", router: "192.168.50.1", routerMAC: "aa", ssid: "Dorm_WiFi")
+        let phone = NetworkInfo(id: "mac:bb", interface: "en0", router: "172.20.10.1", routerMAC: "bb")
+        try store.upsertNetwork(dorm, at: date("2026-11-02 09:00"))
+        try store.upsertNetwork(phone, at: date("2026-11-02 10:00"))
+        // 第二次看到時沒拿到 SSID，不能把原本的名稱清掉
+        try store.upsertNetwork(NetworkInfo(id: "mac:aa", interface: "en0", router: "192.168.50.1", routerMAC: "aa"),
+                                at: date("2026-11-02 11:00"))
+        try store.setNetworkQuota("mac:aa", bytes: 12e9)
+        try store.setNetworkQuota("mac:bb", bytes: 16e9)
+        try store.setNetworkLabel("mac:bb", "  手機熱點 ")
+
+        let networks = store.networks()
+        #expect(networks.map(\.displayName) == ["Dorm_WiFi", "手機熱點"])
+        #expect(networks.map(\.quotaBytes) == [12e9, 16e9])
+
+        let t = date("2026-11-02 10:00")
+        try store.addNetworkMinute(at: t, network: "mac:aa", ByteCounts(rx: 100, tx: 10))
+        try store.addNetworkMinute(at: t, network: "mac:bb", ByteCounts(rx: 5, tx: 0))
+        try store.addNetworkMinute(at: t.addingTimeInterval(60), network: "mac:aa", ByteCounts(rx: 1, tx: 0))
+        try store.setCalibration(day: "2026-11-02", network: "mac:aa", bytes: 500)
+
+        let totals = store.networkTotals(from: date("2026-11-02 00:00"), to: date("2026-11-03 00:00"))
+        #expect(totals["mac:aa"] == ByteCounts(rx: 101, tx: 10))
+        #expect(totals["mac:bb"] == ByteCounts(rx: 5, tx: 0))
+        #expect(store.calibrations(day: "2026-11-02") == ["mac:aa": 500])
+
+        let dorm1 = store.dailySummaries(from: date("2026-11-02 00:00"), to: date("2026-11-02 23:00"), policy: policy, network: "mac:aa")
+        #expect(dorm1.first?.total == 611)
+        let phone1 = store.dailySummaries(from: date("2026-11-02 00:00"), to: date("2026-11-02 23:00"), policy: policy, network: "mac:bb")
+        #expect(phone1.first?.total == 5)
+    }
+
+    @Test func backfillsLegacyDataOnce() throws {
+        let store = try TrafficStore(path: ":memory:")
+        // 模擬升級前的資料：沒有網路資訊的分鐘與舊版校正
+        try store.addMinute(at: Date(timeIntervalSince1970: 600), ByteCounts(rx: 42, tx: 8))
+        try store.db.run("INSERT INTO calibration (day, bytes) VALUES ('1970-01-01', 7)")
+        try store.upsertNetwork(NetworkInfo(id: "mac:aa", interface: "en0", router: "1.1.1.1", routerMAC: "aa"))
+
+        #expect(try store.backfillUnassigned(to: "mac:aa", legacyQuotaBytes: 12e9))
+        #expect(try !store.backfillUnassigned(to: "mac:bb", legacyQuotaBytes: 1))
+        let totals = store.networkTotals(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 10_000))
+        #expect(totals == ["mac:aa": ByteCounts(rx: 42, tx: 8)])
+        #expect(store.networks().first?.quotaBytes == 12e9)
+        #expect(store.calibrations(day: "1970-01-01") == ["mac:aa": 7])
+        store.forEachMinute(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 10_000)) { _, record in
+            #expect(record.network == "mac:aa")
+        }
+    }
+
+    @Test func datasetIncludesNetworks() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("NetQuotaTests-\(UUID().uuidString)")
+        let store = try TrafficStore(path: ":memory:")
+        let policy = QuotaPolicy(quotaBytes: 0, resetHour: 0, calendar: taipei)
+        let t = date("2026-11-02 10:00")
+        try store.upsertNetwork(NetworkInfo(id: "mac:aa", interface: "en0", router: "1.1.1.1", routerMAC: "aa", ssid: "Dorm_WiFi"))
+        try store.setNetworkQuota("mac:aa", bytes: 100)
+        try store.addMinute(at: t, MinuteRecord(bytes: ByteCounts(rx: 150, tx: 0), observedSeconds: 60, network: "mac:aa"))
+        try store.addNetworkMinute(at: t, network: "mac:aa", ByteCounts(rx: 150, tx: 0))
+
+        let result = try DatasetExporter.export(store: store, policy: policy, to: dir, now: t.addingTimeInterval(60))
+        #expect(result.networkRows == 1)
+        let days = try String(contentsOf: dir.appendingPathComponent("days.csv"), encoding: .utf8)
+        #expect(days.contains("2026-11-02,mac:aa,150,0,0,150,100,1,"))   // 超過該網路的上限
+        #expect(days.contains("2026-11-02,,150,0,0,150,,,"))             // 全部網路沒有上限
+        let networks = try String(contentsOf: dir.appendingPathComponent("networks.csv"), encoding: .utf8)
+        #expect(networks.contains("mac:aa,Dorm_WiFi,Dorm_WiFi,1.1.1.1,100,"))
+        let minutes = try String(contentsOf: dir.appendingPathComponent("minutes.csv"), encoding: .utf8)
+        #expect(minutes.contains(",60,0,,mac:aa"))
+    }
+}
+
+@Suite struct SampleTests {
+    @Test func migratesToV3AndRoundTripsSamples() throws {
+        let store = try TrafficStore(path: ":memory:")
+        var version: Int64 = 0
+        try store.db.query("PRAGMA user_version") { version = $0.int(0) }
+        #expect(version == TrafficStore.schemaVersion)
+
+        let t = Date(timeIntervalSince1970: 1_000.1234)
+        let sample = TotalSample(time: t, dt: 2.003, bytes: ByteCounts(rx: 500, tx: 20), awake: true, network: "mac:aa",
+                                 interfaces: ["en0": ByteCounts(rx: 480, tx: 20), "en7": ByteCounts(rx: 20, tx: 0)])
+        try store.addSample(sample)
+        try store.addSample(TotalSample(time: t.addingTimeInterval(30), dt: 28, bytes: .zero, awake: false,
+                                        network: nil, interfaces: [:]))
+        try store.addAppSample(AppSample(time: t, app: "Steam", pid: 42, bytes: ByteCounts(rx: 400, tx: 1), network: "mac:aa"))
+        try store.addAppSample(AppSample(time: t, app: "Steam", pid: 43, bytes: ByteCounts(rx: 10, tx: 0), network: "mac:aa"))
+
+        var samples: [TotalSample] = []
+        store.forEachSample(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 5_000)) { samples.append($0) }
+        #expect(samples.count == 2)
+        #expect(abs(samples[0].time.timeIntervalSince1970 - 1_000.123) < 1e-6)   // 毫秒精度
+        #expect(samples[0].interfaces == sample.interfaces)
+        #expect(samples[0].network == "mac:aa")
+        #expect(!samples[1].awake)
+        #expect(samples[1].interfaces.isEmpty)
+
+        var apps: [AppSample] = []
+        store.forEachAppSample(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 5_000)) { apps.append($0) }
+        #expect(apps.map(\.pid) == [42, 43])
+        #expect(abs((store.firstSample()?.timeIntervalSince1970 ?? 0) - 1_000.123) < 1e-6)
+    }
+
+    @Test func exportsSamplesAcrossDays() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("NetQuotaTests-\(UUID().uuidString)")
+        let store = try TrafficStore(path: ":memory:")
+        let policy = QuotaPolicy(quotaBytes: 0, resetHour: 0, calendar: taipei)
+        let start = date("2026-11-01 23:59")
+        // 跨過午夜、超過 24 小時，確認分塊不會漏也不會重複
+        for offset in [0.0, 2.0, 90_000.0] {
+            try store.addSample(TotalSample(time: start.addingTimeInterval(offset), dt: 2, bytes: ByteCounts(rx: 1, tx: 1),
+                                            awake: true, network: "mac:aa", interfaces: ["en0": ByteCounts(rx: 1, tx: 1)]))
+        }
+        try store.addAppSample(AppSample(time: start, app: "a,b", pid: 7, bytes: ByteCounts(rx: 3, tx: 0), network: nil))
+
+        let result = try DatasetExporter.export(store: store, policy: policy, to: dir, now: start.addingTimeInterval(90_000))
+        #expect(result.sampleRows == 3)
+        #expect(result.appSampleRows == 1)
+        let lines = try String(contentsOf: dir.appendingPathComponent("samples.csv"), encoding: .utf8).split(separator: "\n")
+        #expect(lines.count == 4)
+        #expect(lines[1].hasSuffix(",2.000,1,1,1,mac:aa,en0=1/1"))
+        let apps = try String(contentsOf: dir.appendingPathComponent("app_samples.csv"), encoding: .utf8)
+        #expect(apps.contains("\"a,b\",7,3,0,"))
     }
 }
