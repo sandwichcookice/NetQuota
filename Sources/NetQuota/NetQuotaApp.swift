@@ -58,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 關掉儀表板視窗只是收回選單列，App 繼續在背景記錄。
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     /// 選單列太滿時圖示可能被瀏海擋住，再次打開 App 就直接顯示儀表板。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated { AppModel.shared.showDashboard() }

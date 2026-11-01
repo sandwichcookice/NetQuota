@@ -46,7 +46,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSLocationUsageDescription</key>
@@ -61,6 +61,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# 每次打包用不同的版本號，系統與 Dock 才會重新讀取圖示，不會沿用舊的快取。
+/usr/bin/sed -i '' "s/BUILD_NUMBER/$(date +%Y%m%d%H%M%S)/" "$APP/Contents/Info.plist"
+
 codesign --force --sign - "$APP"
 echo "已產生 $APP"
 
@@ -69,6 +72,8 @@ if [[ "${1:-}" == "--install" ]]; then
     sleep 1
     rm -rf /Applications/NetQuota.app
     cp -R "$APP" /Applications/
+    # 重新登記 App，讓 Dock 上固定的圖示馬上更新（否則可能暫時顯示成空白）。
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/NetQuota.app
     open /Applications/NetQuota.app
     echo "已安裝到 /Applications 並啟動"
 fi
