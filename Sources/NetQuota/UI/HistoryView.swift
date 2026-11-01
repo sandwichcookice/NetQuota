@@ -5,6 +5,7 @@ import SwiftUI
 struct HistoryView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var collector: TrafficCollector
+    @Environment(\.theme) private var theme
 
     enum Span: Int, CaseIterable, Identifiable {
         case week = 7, month = 30, quarter = 90, year = 365
@@ -73,8 +74,8 @@ struct HistoryView: View {
                 ExportMenu()
             }
             summary
-            chart.frame(height: 220)
-            table
+            chart.frame(height: 220).panel()
+            table.panel()
         }
         .padding(20)
         .task(id: "\(span.rawValue)-\(grouping.rawValue)-\(network)-\(collector.dataVersion)") { reload() }
@@ -100,7 +101,7 @@ struct HistoryView: View {
             StatTile(title: "平均每日（有資料的日子）", value: settings.format(average))
             StatTile(title: "最高的一天", value: maxDay.map { settings.format($0.total) } ?? "—", detail: maxDay?.label)
             StatTile(title: "超過上限的天數", value: quota == nil ? "—" : "\(over) 天",
-                     detail: quota == nil ? "選擇有設定上限的網路" : nil, tint: quota == nil ? .primary : (over > 0 ? .red : .green))
+                     detail: quota == nil ? "選擇有設定上限的網路" : nil, tint: quota == nil ? nil : (over > 0 ? theme.bad : theme.good))
         }
     }
 
@@ -122,11 +123,11 @@ struct HistoryView: View {
             }
             if grouping == .day, let quota {
                 RuleMark(y: .value("上限", quota / settings.bytesPerGB))
-                    .foregroundStyle(.red.opacity(0.7))
+                    .foregroundStyle(theme.bad.opacity(0.7))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
             }
         }
-        .chartForegroundStyleScale(["下載": UsageColor.download, "上傳": UsageColor.upload, "校正": Color.gray])
+        .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload, "校正": Color.gray])
         .chartYAxisLabel(settings.binaryUnits ? "GiB" : "GB")
         .chartXAxis {
             AxisMarks { value in
@@ -139,20 +140,41 @@ struct HistoryView: View {
         }
     }
 
+    /// 預設風格用原本的系統表格；Hack／Glass 用實心表頭的自訂表格。
+    @ViewBuilder
     private var table: some View {
+        if theme.kind == .standard { systemTable } else { plainTable }
+    }
+
+    private var systemTable: some View {
         Table(rows.reversed()) {
             TableColumn(grouping == .day ? "日期" : "期間") { row in
-                Text(row.label).foregroundStyle(isOver(row) ? .red : .primary)
+                Text(row.label).foregroundStyle(isOver(row) ? theme.bad : .primary)
             }
             TableColumn("下載") { Text(settings.format($0.rx)).monospacedDigit() }
             TableColumn("上傳") { Text(settings.format($0.tx)).monospacedDigit() }
             TableColumn("合計") { row in
                 Text(settings.format(row.total)).monospacedDigit()
-                    .foregroundStyle(isOver(row) ? .red : .primary)
+                    .foregroundStyle(isOver(row) ? theme.bad : .primary)
             }
             TableColumn("下載峰值") { Text(settings.formatRate($0.peakRx)).monospacedDigit() }
             TableColumn("上傳峰值") { Text(settings.formatRate($0.peakTx)).monospacedDigit() }
         }
+    }
+
+    private var plainTable: some View {
+        PlainTable(rows: Array(rows.reversed()), columns: [
+            PlainColumn(grouping == .day ? "日期" : "期間") { row in
+                Text(row.label).foregroundStyle(isOver(row) ? theme.bad : .primary)
+            },
+            PlainColumn("下載", width: 90, alignment: .trailing) { Text(settings.format($0.rx)) },
+            PlainColumn("上傳", width: 90, alignment: .trailing) { Text(settings.format($0.tx)) },
+            PlainColumn("合計", width: 90, alignment: .trailing) { row in
+                Text(settings.format(row.total)).foregroundStyle(isOver(row) ? theme.bad : .primary)
+            },
+            PlainColumn("下載峰值", width: 100, alignment: .trailing) { Text(settings.formatRate($0.peakRx)) },
+            PlainColumn("上傳峰值", width: 100, alignment: .trailing) { Text(settings.formatRate($0.peakTx)) },
+        ])
     }
 
     @State private var dailyRowsForStats: [Row] = []

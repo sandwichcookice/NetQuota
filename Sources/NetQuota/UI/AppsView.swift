@@ -5,6 +5,7 @@ import SwiftUI
 struct AppsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var collector: TrafficCollector
+    @Environment(\.theme) private var theme
 
     enum Range: String, CaseIterable, Identifiable {
         case today = "今日", yesterday = "昨日", week = "7 天", month = "30 天", all = "全部"
@@ -30,13 +31,13 @@ struct AppsView: View {
                 ContentUnavailableView("尚無資料", systemImage: "square.grid.2x2",
                                        description: Text("程式流量會在 App 執行期間持續記錄。"))
             } else {
-                chart.frame(height: min(CGFloat(min(apps.count, 10)) * 26 + 20, 280))
-                table
+                chart.frame(height: min(CGFloat(min(apps.count, 10)) * 26 + 20, 280)).panel()
+                table.panel()
             }
 
             Text("各程式流量來自系統的 nettop，只在 NetQuota 執行期間記錄；輔助程序（例如 Chrome Helper、WebKit）會歸到所屬的 App。各程式加總可能與總用量略有差異（系統層級流量、VPN 封裝等），額度以總用量為準。")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
@@ -59,12 +60,18 @@ struct AppsView: View {
                     .foregroundStyle(by: .value("方向", "上傳"))
             }
         }
-        .chartForegroundStyleScale(["下載": UsageColor.download, "上傳": UsageColor.upload])
+        .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload])
         .chartXAxisLabel("MB")
         .chartYScale(domain: top.map(\.name))
     }
 
+    /// 預設風格用原本的系統表格；Hack／Glass 用實心表頭的自訂表格，才能配合深色或透明背景。
+    @ViewBuilder
     private var table: some View {
+        if theme.kind == .standard { systemTable } else { plainTable }
+    }
+
+    private var systemTable: some View {
         let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
         return Table(apps) {
             TableColumn("程式") { app in
@@ -81,6 +88,24 @@ struct AppsView: View {
                 Text(String(format: "%.1f%%", Double(app.bytes.total) / sum * 100)).monospacedDigit()
             }
         }
+    }
+
+    private var plainTable: some View {
+        let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
+        return PlainTable(rows: apps, columns: [
+            PlainColumn("程式") { app in
+                HStack(spacing: 6) {
+                    AppIconView(path: app.path, size: 16)
+                    Text(app.name)
+                }
+            },
+            PlainColumn("下載", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.rx)) },
+            PlainColumn("上傳", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.tx)) },
+            PlainColumn("合計", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.total)) },
+            PlainColumn("佔比", width: 60, alignment: .trailing) { app in
+                Text(String(format: "%.1f%%", Double(app.bytes.total) / sum * 100))
+            },
+        ])
     }
 
     private func reload() {

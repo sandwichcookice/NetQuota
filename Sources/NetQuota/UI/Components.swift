@@ -2,21 +2,9 @@ import AppKit
 import NetQuotaCore
 import SwiftUI
 
-enum UsageColor {
-    static func forFraction(_ fraction: Double) -> Color {
-        switch fraction {
-        case ..<0.7: .green
-        case ..<0.9: .orange
-        default: .red
-        }
-    }
-
-    static let download = Color.blue
-    static let upload = Color.purple
-}
-
-/// 今日用量的圓環。
+/// 今日用量的圓環。Hack 風格為虛線刻度環並發光。
 struct UsageRing: View {
+    @Environment(\.theme) private var theme
     let fraction: Double
     let usedText: String
     /// nil 代表沒有設定上限。
@@ -24,28 +12,44 @@ struct UsageRing: View {
     var lineWidth: CGFloat = 12
 
     var body: some View {
+        let color = quotaText == nil ? theme.secondary : theme.forFraction(fraction)
+        let style = theme.isHack
+            ? StrokeStyle(lineWidth: lineWidth, lineCap: .butt, dash: [3, 2])
+            : StrokeStyle(lineWidth: lineWidth, lineCap: .round)
         ZStack {
-            Circle().stroke(Color.secondary.opacity(0.15), lineWidth: lineWidth)
+            Circle().stroke(theme.isHack ? theme.accent.opacity(0.12) : Color.secondary.opacity(0.15), style: style)
             Circle()
                 .trim(from: 0, to: min(max(fraction, 0), 1))
-                .stroke(UsageColor.forFraction(fraction), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .stroke(theme.isHack ? AnyShapeStyle(color) : AnyShapeStyle(AngularGradient(
+                    colors: [color.opacity(0.65), color], center: .center,
+                    startAngle: .degrees(0), endAngle: .degrees(360 * max(fraction, 0.01)))), style: style)
                 .rotationEffect(.degrees(-90))
+                .glow(color)
                 .animation(.easeOut(duration: 0.4), value: fraction)
+            if theme.isHack {
+                Circle().stroke(theme.accent.opacity(0.25), lineWidth: 0.5).padding(lineWidth + 4)
+                RadarSweep(color: color).padding(lineWidth / 2)
+            }
             VStack(spacing: 2) {
-                Text(usedText)
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                Group {
+                    if theme.isHack { ScrambleText(text: usedText) } else { Text(usedText) }
+                }
+                    .font(.system(size: theme.isHack ? 17 : 20, weight: theme.isHack ? .bold : .semibold))
                     .monospacedDigit()
+                    .foregroundStyle(theme.isHack ? theme.accent : .primary)
+                    .glow()
                 if let quotaText {
                     Text("/ \(quotaText)")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(Int((fraction * 100).rounded()))%")
+                        .foregroundStyle(theme.secondary)
+                    Text(theme.isHack ? "[\(Int((fraction * 100).rounded()))%]" : "\(Int((fraction * 100).rounded()))%")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(UsageColor.forFraction(fraction))
+                        .foregroundStyle(color)
+                        .glow(color)
                 } else {
-                    Text("未設定上限")
+                    Text(theme.isHack ? "NO_LIMIT" : "未設定上限")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.secondary)
                 }
             }
         }
@@ -54,6 +58,7 @@ struct UsageRing: View {
 
 /// 程式圖示：.app 用系統圖示，其他執行檔用終端機符號。
 struct AppIconView: View {
+    @Environment(\.theme) private var theme
     let path: String?
     var size: CGFloat = 18
 
@@ -66,7 +71,7 @@ struct AppIconView: View {
             Image(systemName: "terminal")
                 .font(.system(size: size * 0.6))
                 .frame(width: size, height: size)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.secondary)
         }
     }
 
@@ -81,31 +86,37 @@ struct AppIconView: View {
 
 /// 儀表板上方的數字卡片。
 struct StatTile: View {
+    @Environment(\.theme) private var theme
     let title: String
     let value: String
     var detail: String?
-    var tint: Color = .primary
+    /// nil 用預設文字色（Hack 風格為霓虹綠）。
+    var tint: Color?
 
     var body: some View {
+        let color = tint ?? (theme.isHack ? theme.accent : .primary)
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+            Text(theme.label(title)).font(.caption).foregroundStyle(theme.secondary)
+            Group {
+                if theme.isHack { ScrambleText(text: value) } else { Text(value) }
+            }
+                .font(.system(size: 18, weight: theme.isHack ? .bold : .semibold))
                 .monospacedDigit()
-                .foregroundStyle(tint)
+                .foregroundStyle(color)
+                .glow(color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             // 沒有附註時保留同樣高度，讓同一列的卡片對齊。
-            Text(detail ?? " ").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text(detail ?? " ").font(.caption2).foregroundStyle(theme.secondary).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .themedCard()
     }
 }
 
 /// 一列程式用量（圖示、名稱、比例條、數字）。
 struct AppUsageRow: View {
+    @Environment(\.theme) private var theme
     let app: AppUsage
     let maxTotal: UInt64
     let format: (UInt64) -> String
@@ -113,23 +124,29 @@ struct AppUsageRow: View {
     var body: some View {
         HStack(spacing: 8) {
             AppIconView(path: app.path)
+                .saturation(theme.isHack ? 0 : 1)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(app.name).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Text(format(app.bytes.total)).monospacedDigit().foregroundStyle(.secondary)
+                    Text(format(app.bytes.total)).monospacedDigit().foregroundStyle(theme.secondary)
                 }
                 .font(.callout)
-                GeometryReader { proxy in
-                    let width = maxTotal > 0 ? proxy.size.width * CGFloat(Double(app.bytes.total) / Double(maxTotal)) : 0
-                    let rxShare = app.bytes.total > 0 ? CGFloat(Double(app.bytes.rx) / Double(app.bytes.total)) : 0
-                    HStack(spacing: 0) {
-                        Rectangle().fill(UsageColor.download).frame(width: width * rxShare)
-                        Rectangle().fill(UsageColor.upload).frame(width: width * (1 - rxShare))
+                if theme.isHack {
+                    BlockBar(fraction: maxTotal > 0 ? Double(app.bytes.total) / Double(maxTotal) : 0, cells: 32,
+                             color: theme.download)
+                } else {
+                    GeometryReader { proxy in
+                        let width = maxTotal > 0 ? proxy.size.width * CGFloat(Double(app.bytes.total) / Double(maxTotal)) : 0
+                        let rxShare = app.bytes.total > 0 ? CGFloat(Double(app.bytes.rx) / Double(app.bytes.total)) : 0
+                        HStack(spacing: 0) {
+                            Rectangle().fill(theme.download).frame(width: width * rxShare)
+                            Rectangle().fill(theme.upload).frame(width: width * (1 - rxShare))
+                        }
+                        .clipShape(Capsule())
                     }
-                    .clipShape(Capsule())
+                    .frame(height: 4)
                 }
-                .frame(height: 4)
             }
         }
     }
@@ -144,6 +161,7 @@ enum NetworkIcon {
 
 /// 一個網路今天的用量與上限。
 struct NetworkUsageRow: View {
+    @Environment(\.theme) private var theme
     let usage: NetworkUsage
     let format: (Double) -> String
 
@@ -151,23 +169,49 @@ struct NetworkUsageRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Image(systemName: NetworkIcon.symbol(for: usage.network.interface))
-                    .foregroundStyle(.secondary).frame(width: 14)
+                    .foregroundStyle(theme.secondary).frame(width: 14)
                 Text(usage.network.displayName).lineLimit(1)
                 if usage.isCurrent {
-                    Text("目前").font(.caption2).padding(.horizontal, 4)
-                        .background(.tint.opacity(0.2), in: Capsule())
+                    Text(theme.isHack ? "*" : "目前").font(.caption2).padding(.horizontal, 4)
+                        .background(theme.accent.opacity(0.2), in: Capsule())
                 }
                 Spacer()
                 Text(usage.quota.map { "\(format(usage.used)) / \(format($0))" } ?? format(usage.used))
-                    .monospacedDigit().foregroundStyle(.secondary)
+                    .monospacedDigit().foregroundStyle(theme.secondary)
             }
             .font(.callout)
             if let fraction = usage.fraction {
-                ProgressView(value: min(fraction, 1))
-                    .tint(UsageColor.forFraction(fraction))
-                    .controlSize(.mini)
+                if theme.isHack {
+                    BlockBar(fraction: fraction, cells: 32)
+                } else {
+                    ProgressView(value: min(fraction, 1))
+                        .tint(theme.forFraction(fraction))
+                        .controlSize(.mini)
+                }
             }
         }
+    }
+}
+
+/// 區塊標題。
+struct SectionTitle: View {
+    @Environment(\.theme) private var theme
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Group {
+            if theme.isHack {
+                GlitchText(text: theme.heading(text), color: theme.accent)
+            } else {
+                Text(text)
+            }
+        }
+        .font(.headline)
+        .glow()
     }
 }
 

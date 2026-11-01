@@ -4,6 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
+    @Environment(\.theme) private var theme
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var collector: TrafficCollector
@@ -13,6 +14,21 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("外觀") {
+                Picker("風格", selection: $settings.theme) {
+                    ForEach(AppTheme.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 260)
+                Text(settings.theme.subtitle).font(.caption).foregroundStyle(.secondary)
+                if settings.theme == .standard {
+                    Label(theme.liquidGlass ? "這台 Mac 支援，已自動套用 Apple Liquid Glass"
+                                            : "未套用 Apple Liquid Glass（需要 macOS 26，且沒有開啟「減少透明度」）",
+                          systemImage: theme.liquidGlass ? "checkmark.circle" : "circle.slash")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
             Section("網路與每日上限") {
                 Text("每個網路分開計算，可以各自設定每日上限（例如宿舍 12GB、另一個網路 16GB）。沒有設定上限的網路只記錄、不提醒。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -87,6 +103,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(theme.isHack || theme.isGlass ? .hidden : .automatic)
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {

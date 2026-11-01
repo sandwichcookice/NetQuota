@@ -77,22 +77,26 @@ struct NetQuotaApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            PopoverView()
-                .environmentObject(model)
-                .environmentObject(model.settings)
-                .environmentObject(model.collector)
+            ThemedRoot(settings: model.settings) {
+                PopoverView()
+            }
+            .environmentObject(model)
+            .environmentObject(model.settings)
+            .environmentObject(model.collector)
         } label: {
             MenuBarLabel(collector: model.collector, settings: model.settings, dashboardRequests: model.dashboardRequests)
         }
         .menuBarExtraStyle(.window)
 
         Window("NetQuota", id: "dashboard") {
-            DashboardView()
-                .environmentObject(model)
-                .environmentObject(model.settings)
-                .environmentObject(model.collector)
+            ThemedRoot(settings: model.settings) {
+                DashboardView()
+            }
+            .environmentObject(model)
+            .environmentObject(model.settings)
+            .environmentObject(model.collector)
         }
-        .defaultSize(width: 860, height: 640)
+        .defaultSize(width: 1000, height: 660)
         .defaultLaunchBehavior(.suppressed)
     }
 }

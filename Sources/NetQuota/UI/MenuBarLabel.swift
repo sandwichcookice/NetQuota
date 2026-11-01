@@ -11,8 +11,10 @@ struct MenuBarLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbol)
-            Text(text).monospacedDigit()
+            Image(systemName: settings.theme == .hack && collector.fraction < 0.7 ? "terminal" : symbol)
+            Text(settings.theme == .hack ? "[\(text)]" : text)
+                .monospacedDigit()
+                .fontDesign(settings.theme == .hack ? .monospaced : .default)
         }
         .onReceive(dashboardRequests) {
             openWindow(id: "dashboard")

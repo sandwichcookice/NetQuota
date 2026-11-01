@@ -5,6 +5,7 @@ import SwiftUI
 struct TodayView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var collector: TrafficCollector
+    @Environment(\.theme) private var theme
 
     private struct CumulativePoint: Identifiable {
         let date: Date
@@ -73,13 +74,14 @@ struct TodayView: View {
                                 NetworkUsageRow(usage: usage, format: { settings.format($0) })
                             }
                         }
+                        .panel()
                     }
                 }
                 if let note = collector.recoveredNote {
-                    Label(note, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+                    Label(note, systemImage: "info.circle").font(.caption).foregroundStyle(theme.secondary)
                 }
-                section("累積用量（虛線為依目前速度的預測）") { cumulativeChart(scope).frame(height: 220) }
-                section("每 \(Self.barMinutes) 分鐘用量") { barChart.frame(height: 170) }
+                section("累積用量（虛線為依目前速度的預測）") { cumulativeChart(scope).frame(height: 220).glow().panel() }
+                section("每 \(Self.barMinutes) 分鐘用量") { barChart.frame(height: 170).panel() }
             }
             .padding(20)
         }
@@ -108,11 +110,11 @@ struct TodayView: View {
                 StatTile(title: "今日已用", value: settings.format(scope.used),
                          detail: scope.quota.map { "\(Int((scope.fraction * 100).rounded()))%（上限 \(settings.format($0))）" }
                              ?? "未設定上限",
-                         tint: scope.quota == nil ? .primary : UsageColor.forFraction(scope.fraction))
+                         tint: scope.quota == nil ? nil : theme.forFraction(scope.fraction))
                 StatTile(title: "剩餘", value: scope.remaining.map { settings.format($0) } ?? "不限制",
                          detail: "\(collector.dayEnd.shortTime) 歸零")
-                StatTile(title: "下載", value: settings.format(scope.bytes.rx), tint: UsageColor.download)
-                StatTile(title: "上傳", value: settings.format(scope.bytes.tx), tint: UsageColor.upload)
+                StatTile(title: "下載", value: settings.format(scope.bytes.rx), tint: theme.download)
+                StatTile(title: "上傳", value: settings.format(scope.bytes.tx), tint: theme.upload)
             }
             HStack(spacing: 10) {
                 // 峰值為所有網路合計的速率。
@@ -120,7 +122,7 @@ struct TodayView: View {
                 StatTile(title: "上傳峰值", value: settings.formatRate(peak.txRate), detail: peak.txAt.map { "於 \($0.shortTime)" })
                 StatTile(title: "預估今日總量", value: scope.forecast.map { settings.format($0.projectedTotal) } ?? "—",
                          detail: scope.forecast.map { "近期 \(settings.formatRate($0.rate))" },
-                         tint: (scope.forecast?.projectedTotal ?? 0) > (scope.quota ?? .infinity) ? .orange : .primary)
+                         tint: (scope.forecast?.projectedTotal ?? 0) > (scope.quota ?? .infinity) ? theme.warn : nil)
                 exhaustTile(scope)
             }
         }
@@ -131,16 +133,16 @@ struct TodayView: View {
             return StatTile(title: "預計用完", value: "—", detail: "沒有設定上限")
         }
         if scope.used >= quota {
-            return StatTile(title: "預計用完", value: "已超過", tint: .red)
+            return StatTile(title: "預計用完", value: "已超過", tint: theme.bad)
         }
         guard let forecast = scope.forecast else {
             return StatTile(title: "預計用完", value: "—",
                             detail: scope.networkID == collector.focusNetworkID ? "收集約 2 分鐘資料後顯示" : "只預測目前所在的網路")
         }
         if let exceedAt = forecast.exceedAt {
-            return StatTile(title: "預計用完", value: exceedAt.shortTime, detail: "照目前速度", tint: .red)
+            return StatTile(title: "預計用完", value: exceedAt.shortTime, detail: "照目前速度", tint: theme.bad)
         }
-        return StatTile(title: "預計用完", value: "今天不會", detail: "照目前速度", tint: .green)
+        return StatTile(title: "預計用完", value: "今天不會", detail: "照目前速度", tint: theme.good)
     }
 
     private func cumulativeChart(_ scope: Scope) -> some View {
@@ -148,15 +150,15 @@ struct TodayView: View {
             ForEach(cumulative) { point in
                 LineMark(x: .value("時間", point.date), y: .value("用量", point.value / settings.bytesPerGB),
                          series: .value("系列", point.series))
-                    .foregroundStyle(point.series == "實際" ? Color.accentColor : Color.orange)
+                    .foregroundStyle(point.series == "實際" ? theme.accent : theme.warn)
                     .lineStyle(point.series == "實際" ? StrokeStyle(lineWidth: 2) : StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
             }
             if let quota = scope.quota {
                 RuleMark(y: .value("上限", quota / settings.bytesPerGB))
-                    .foregroundStyle(.red.opacity(0.7))
+                    .foregroundStyle(theme.bad.opacity(0.7))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .annotation(position: .top, alignment: .leading) {
-                        Text("上限 \(settings.format(quota))").font(.caption2).foregroundStyle(.red)
+                        Text("上限 \(settings.format(quota))").font(.caption2).foregroundStyle(theme.bad)
                     }
             }
         }
@@ -177,7 +179,7 @@ struct TodayView: View {
                     yStart: .value("用量", bar.low), yEnd: .value("用量", bar.high))
                 .foregroundStyle(by: .value("方向", bar.direction))
         }
-        .chartForegroundStyleScale(["下載": UsageColor.download, "上傳": UsageColor.upload])
+        .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload])
         .chartXScale(domain: collector.dayStart...collector.dayEnd)
         .chartYAxisLabel("MB")
         .chartXAxis {
@@ -190,7 +192,7 @@ struct TodayView: View {
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
+            SectionTitle(title)
             content()
         }
     }

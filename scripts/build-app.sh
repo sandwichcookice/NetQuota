@@ -64,7 +64,9 @@ PLIST
 # 每次打包用不同的版本號，系統與 Dock 才會重新讀取圖示，不會沿用舊的快取。
 /usr/bin/sed -i '' "s/BUILD_NUMBER/$(date +%Y%m%d%H%M%S)/" "$APP/Contents/Info.plist"
 
-codesign --force --sign - "$APP"
+# ad-hoc 簽章預設用 cdhash 當身分，每次打包都會變，系統就會重新詢問定位等權限。
+# 把身分指定為 Bundle ID，重新打包後系統會沿用之前的授權。
+codesign --force --sign - -r='designated => identifier "io.github.sandwichcookice.NetQuota"' "$APP"
 echo "已產生 $APP"
 
 if [[ "${1:-}" == "--install" ]]; then

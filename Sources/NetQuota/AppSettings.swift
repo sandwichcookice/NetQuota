@@ -33,6 +33,7 @@ final class AppSettings: ObservableObject {
     @Published var appSpikeMinutes: Int { didSet { defaults.set(appSpikeMinutes, forKey: "appSpikeMinutes") } }
     @Published var menuBarStyle: MenuBarStyle { didSet { defaults.set(menuBarStyle.rawValue, forKey: "menuBarStyle") } }
     @Published var showSpeedInMenuBar: Bool { didSet { defaults.set(showSpeedInMenuBar, forKey: "showSpeedInMenuBar") } }
+    @Published var theme: AppTheme { didSet { defaults.set(theme.rawValue, forKey: "appTheme") } }
 
     init() {
         defaults.register(defaults: [
@@ -57,6 +58,7 @@ final class AppSettings: ObservableObject {
         appSpikeMinutes = defaults.integer(forKey: "appSpikeMinutes")
         menuBarStyle = MenuBarStyle(rawValue: defaults.string(forKey: "menuBarStyle") ?? "") ?? .usedOfQuota
         showSpeedInMenuBar = defaults.bool(forKey: "showSpeedInMenuBar")
+        theme = AppTheme(rawValue: defaults.string(forKey: "appTheme") ?? "") ?? .standard
     }
 
     /// 「一天」的切法（上限依網路各自設定，這裡不使用 quotaBytes）。
