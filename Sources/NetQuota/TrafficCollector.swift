@@ -75,6 +75,8 @@ final class TrafficCollector: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     private static let forecastSpan: TimeInterval = 30 * 60
+    private var profile: UsageProfile?
+    private var profileKey = ""
 
     // MARK: - 給介面用的數值（針對目前的網路）
 
@@ -359,16 +361,22 @@ final class TrafficCollector: ObservableObject {
             .sorted { $0.bytes.total > $1.bytes.total }
     }
 
-    /// 只針對目前網路：用它最近 30 分鐘的速率推估，沒有上限的網路不預測。
+    /// 只針對目前網路，沒有上限的網路不預測。有歷史資料時依過去同時段的用量推估，否則用最近 30 分鐘的速率。
     private func updateForecast(now: Date) {
         guard let quota, let focusNetworkID else {
             forecast = nil
             return
         }
+        // 歷史同時段的平均用量：換網路或換日時重新計算。
+        if profileKey != "\(focusNetworkID)|\(dayKey)" {
+            profileKey = "\(focusNetworkID)|\(dayKey)"
+            profile = store.usageProfile(network: focusNetworkID, before: dayStart, policy: settings.policy)
+        }
         // 用實際監測的時間當分母：App 關閉或睡眠的空檔不算，重開後也能接續之前的資料。
         let span = min(Self.forecastSpan, forecastWindow.reduce(0.0) { $0 + $1.observed })
         let recent = forecastWindow.reduce(0.0) { $0 + ($1.network == focusNetworkID ? Double($1.bytes) : 0) }
-        forecast = Forecast.make(used: used, quota: quota, recentBytes: recent, window: span, now: now, dayEnd: dayEnd)
+        forecast = Forecast.make(used: used, quota: quota, recentBytes: recent, window: span, now: now, dayEnd: dayEnd,
+                                 profile: profile)
     }
 
     /// 啟動時從資料庫讀回最近 30 分鐘的原始樣本，重開 App 後不必重新累積就有預測。
@@ -492,7 +500,7 @@ final class TrafficCollector: ObservableObject {
         }
 
         if bytes.total >= 1_000_000 {
-            let span = "\(from.formatted(date: .abbreviated, time: .shortened)) – \(now.formatted(date: .omitted, time: .shortened))"
+            let span = "\(from.shortDateTime) – \(now.shortTime)"
             recoveredNote = "App 未執行期間（\(span)）補回 \(settings.format(bytes.total))，已依時間比例分配到各天；這段期間無法區分各程式。"
         }
     }

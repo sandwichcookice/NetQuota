@@ -73,26 +73,91 @@ public struct QuotaPolicy: Equatable, Sendable {
     }
 }
 
-/// 依目前速度推估今日用量。
+/// 某個網路過去每天各時段的平均用量（bytes／小時，索引為當地時間的 0–23 時）。
+public struct UsageProfile: Equatable, Sendable {
+    public let hourly: [Double]
+    /// 有資料的天數。
+    public let days: Int
+
+    public init(hourly: [Double], days: Int) {
+        precondition(hourly.count == 24)
+        self.hourly = hourly
+        self.days = days
+    }
+
+    /// 少於 3 天的資料不夠穩定，不拿來預測。
+    public var isUsable: Bool { days >= 3 }
+}
+
+public struct ForecastPoint: Equatable, Sendable {
+    public let date: Date
+    public let total: Double
+}
+
+/// 推估今天結束時的用量。
+///
+/// - 有 3 天以上的歷史資料時：接下來 30 分鐘用最近的速度，之後每個小時用過去同一時段的平均用量。
+///   這樣凌晨不會把短時間的速度放大成整天。
+/// - 資料不足時：退回用最近 30 分鐘的速度直線延伸。
 public struct Forecast: Equatable, Sendable {
-    /// 依近期速率推估到今天結束的總用量。
+    public enum Method: Equatable, Sendable {
+        case recentRate
+        case history(days: Int)
+    }
+
+    /// 推估今天結束時的總用量。
     public let projectedTotal: Double
     /// 近期平均速率（bytes/s，上傳＋下載）。
     public let rate: Double
-    /// 預計超過額度的時間；今天內不會超過則為 nil。
+    /// 預計超過上限的時間；今天內不會超過則為 nil。
     public let exceedAt: Date?
+    public let method: Method
+    /// 從現在到今天結束的預測曲線（給圖表畫虛線）。
+    public let curve: [ForecastPoint]
+
+    static let blendSpan: TimeInterval = 30 * 60
 
     public static func make(used: Double, quota: Double, recentBytes: Double, window: TimeInterval,
-                            now: Date, dayEnd: Date) -> Forecast? {
-        guard window >= 120 else { return nil }
-        let rate = max(0, recentBytes / window)
-        let remaining = max(0, dayEnd.timeIntervalSince(now))
-        let projected = used + rate * remaining
+                            now: Date, dayEnd: Date, profile: UsageProfile? = nil,
+                            calendar: Calendar = .current) -> Forecast? {
+        let hasRate = window >= 120
+        let rate = hasRate ? max(0, recentBytes / window) : 0
+        let useProfile = profile?.isUsable == true
+        guard hasRate || useProfile else { return nil }
+
+        var curve = [ForecastPoint(date: now, total: used)]
+        var total = used
         var exceedAt: Date?
-        if used < quota, rate > 0 {
-            let when = now.addingTimeInterval((quota - used) / rate)
-            if when < dayEnd { exceedAt = when }
+        var cursor = now
+
+        func advance(to next: Date, bytesPerSecond: Double) {
+            let seconds = next.timeIntervalSince(cursor)
+            guard seconds > 0 else { return }
+            let added = bytesPerSecond * seconds
+            if exceedAt == nil, total < quota, total + added >= quota, bytesPerSecond > 0 {
+                exceedAt = cursor.addingTimeInterval((quota - total) / bytesPerSecond)
+            }
+            total += added
+            cursor = next
+            curve.append(ForecastPoint(date: next, total: total))
         }
-        return Forecast(projectedTotal: projected, rate: rate, exceedAt: exceedAt)
+
+        if let profile, useProfile {
+            // 先用最近的速度接 30 分鐘（沒有近期速度時直接用歷史）。
+            if hasRate {
+                advance(to: min(now.addingTimeInterval(blendSpan), dayEnd), bytesPerSecond: rate)
+            }
+            while cursor < dayEnd {
+                let hourStart = calendar.dateInterval(of: .hour, for: cursor)?.start ?? cursor
+                let next = min(hourStart.addingTimeInterval(3600), dayEnd)
+                let hour = calendar.component(.hour, from: cursor)
+                advance(to: next, bytesPerSecond: profile.hourly[hour] / 3600)
+            }
+            return Forecast(projectedTotal: total, rate: rate, exceedAt: exceedAt,
+                            method: .history(days: profile.days), curve: curve)
+        }
+
+        advance(to: dayEnd, bytesPerSecond: rate)
+        return Forecast(projectedTotal: total, rate: rate, exceedAt: exceedAt, method: .recentRate, curve: curve)
     }
 }

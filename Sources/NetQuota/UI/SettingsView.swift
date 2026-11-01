@@ -128,7 +128,7 @@ private struct BackupRow: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("每日自動備份（保留 14 份）")
-                Text(backups.lastBackup.map { "上次備份：\($0.formatted(date: .abbreviated, time: .shortened))" } ?? "尚未備份")
+                Text(backups.lastBackup.map { "上次備份：\($0.shortDateTime)" } ?? "尚未備份")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = backups.lastError {
                     Text(error).font(.caption).foregroundStyle(.red)
@@ -250,7 +250,7 @@ private struct NetworkSettingsRow: View {
         if let ssid = network.ssid { parts.append("Wi-Fi：\(ssid)") }
         if let router = network.router { parts.append("路由器 \(router)") }
         if network.id.hasPrefix("mac:") { parts.append(String(network.id.dropFirst(4))) }
-        parts.append("最後連線 \(network.lastSeen.formatted(date: .abbreviated, time: .shortened))")
+        parts.append("最後連線 \(network.lastSeen.shortDateTime)")
         return parts.joined(separator: " · ")
     }
 

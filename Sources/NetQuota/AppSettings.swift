@@ -45,7 +45,8 @@ final class AppSettings: ObservableObject {
             "appSpikeEnabled": true,
             "appSpikeGB": 1.0,
             "appSpikeMinutes": 10,
-            "menuBarStyle": MenuBarStyle.usedOfQuota.rawValue,
+            // 選單列滿的時候，越短越不容易被瀏海擋住。
+            "menuBarStyle": MenuBarStyle.percent.rawValue,
             "showSpeedInMenuBar": false,
         ])
         quotaGB = defaults.double(forKey: "quotaGB")
@@ -56,7 +57,7 @@ final class AppSettings: ObservableObject {
         appSpikeEnabled = defaults.bool(forKey: "appSpikeEnabled")
         appSpikeGB = defaults.double(forKey: "appSpikeGB")
         appSpikeMinutes = defaults.integer(forKey: "appSpikeMinutes")
-        menuBarStyle = MenuBarStyle(rawValue: defaults.string(forKey: "menuBarStyle") ?? "") ?? .usedOfQuota
+        menuBarStyle = MenuBarStyle(rawValue: defaults.string(forKey: "menuBarStyle") ?? "") ?? .percent
         showSpeedInMenuBar = defaults.bool(forKey: "showSpeedInMenuBar")
         theme = AppTheme(rawValue: defaults.string(forKey: "appTheme") ?? "") ?? .standard
     }

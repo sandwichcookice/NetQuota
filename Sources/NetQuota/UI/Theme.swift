@@ -75,13 +75,14 @@ struct Theme {
         isHack ? "// \(text)" : text
     }
 
+    /// 下載藍、上傳橘：色盲也分得出來的配對。警示改用琥珀色，避免和上傳撞色。
     static let standard = Theme(
         kind: .standard,
         accent: .accentColor,
         download: .blue,
-        upload: .purple,
+        upload: Color(red: 0.93, green: 0.45, blue: 0.10),
         good: .green,
-        warn: .orange,
+        warn: Color(red: 0.88, green: 0.66, blue: 0.00),
         bad: .red,
         secondary: .secondary,
         cardRadius: 8
@@ -92,11 +93,12 @@ struct Theme {
         kind: .glass,
         accent: .accentColor,
         download: Color(red: 0.45, green: 0.78, blue: 1.00),
-        upload: Color(red: 0.88, green: 0.62, blue: 1.00),
+        upload: Color(red: 1.00, green: 0.62, blue: 0.33),
         good: Color(red: 0.42, green: 0.92, blue: 0.58),
-        warn: Color(red: 1.00, green: 0.72, blue: 0.30),
+        warn: Color(red: 1.00, green: 0.84, blue: 0.30),
         bad: Color(red: 1.00, green: 0.45, blue: 0.45),
-        secondary: .secondary,
+        // 透明玻璃上系統的次要文字色太淡，提高對比。
+        secondary: Color.white.opacity(0.78),
         cardRadius: 14
     )
 

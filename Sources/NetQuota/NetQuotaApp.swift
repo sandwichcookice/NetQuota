@@ -45,6 +45,10 @@ final class AppModel: ObservableObject {
         backups = url.map { BackupManager(store: store, databaseURL: $0) }
         collector.start()
         backups?.start()
+        // 第一次啟動：選單列圖示可能被瀏海擋住，直接打開儀表板並說明。
+        if !UserDefaults.standard.bool(forKey: "onboardingDismissed") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.showDashboard(.today) }
+        }
     }
 }
 

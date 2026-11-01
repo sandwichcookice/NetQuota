@@ -88,6 +88,25 @@ extension TrafficStore {
         return rows
     }
 
+    /// 某個網路在 `before` 之前 `days` 天裡，每天各時段的平均用量。只計算有用量的日子。
+    public func usageProfile(network: String, before: Date, days: Int = 14, policy: QuotaPolicy) -> UsageProfile {
+        var hourly = [Double](repeating: 0, count: 24)
+        var activeDays = Set<String>()
+        let from = before.addingTimeInterval(-Double(days) * 86_400)
+        try? db.query("""
+            SELECT ts / 3600 * 3600 AS h, SUM(rx + tx) FROM minute_network
+            WHERE ts >= ? AND ts < ? AND network = ? GROUP BY h
+            """, range(from, before) + [.text(network)]) { row in
+            let date = Date(timeIntervalSince1970: TimeInterval(row.int(0)))
+            let bytes = Double(row.int(1))
+            guard bytes > 0 else { return }
+            hourly[policy.calendar.component(.hour, from: date)] += bytes
+            activeDays.insert(policy.dayKey(for: date))
+        }
+        let count = activeDays.count
+        return UsageProfile(hourly: count > 0 ? hourly.map { $0 / Double(count) } : hourly, days: count)
+    }
+
     public func forEachNetworkMinute(from: Date, to: Date, _ body: (Date, String, ByteCounts) -> Void) {
         try? db.query("SELECT ts, network, rx, tx FROM minute_network WHERE ts >= ? AND ts < ? ORDER BY ts, network",
                       range(from, to)) { row in

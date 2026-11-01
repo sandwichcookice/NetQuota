@@ -1,4 +1,3 @@
-import Charts
 import NetQuotaCore
 import SwiftUI
 
@@ -31,8 +30,14 @@ struct AppsView: View {
                 ContentUnavailableView("尚無資料", systemImage: "square.grid.2x2",
                                        description: Text("程式流量會在 App 執行期間持續記錄。"))
             } else {
-                chart.frame(height: min(CGFloat(min(apps.count, 10)) * 26 + 20, 280)).panel()
+                // 比例條直接放在每一列，不再另外畫一張重複的圖表，表格可以顯示更多列。
                 table.panel()
+                HStack(spacing: 12) {
+                    Label("下載", systemImage: "square.fill").foregroundStyle(theme.download)
+                    Label("上傳", systemImage: "square.fill").foregroundStyle(theme.upload)
+                }
+                .font(.caption)
+                .labelStyle(.titleAndIcon)
             }
 
             Text("各程式流量來自系統的 nettop，只在 NetQuota 執行期間記錄；輔助程序（例如 Chrome Helper、WebKit）會歸到所屬的 App。各程式加總可能與總用量略有差異（系統層級流量、VPN 封裝等），額度以總用量為準。")
@@ -47,22 +52,36 @@ struct AppsView: View {
         }
     }
 
-    private var chart: some View {
-        let top = Array(apps.prefix(10))
-        return Chart {
-            ForEach(top) { app in
-                BarMark(xStart: .value("用量", 0), xEnd: .value("用量", Double(app.bytes.rx) / 1_000_000),
-                        y: .value("程式", app.name))
-                    .foregroundStyle(by: .value("方向", "下載"))
-                BarMark(xStart: .value("用量", Double(app.bytes.rx) / 1_000_000),
-                        xEnd: .value("用量", Double(app.bytes.total) / 1_000_000),
-                        y: .value("程式", app.name))
-                    .foregroundStyle(by: .value("方向", "上傳"))
+    /// 程式名稱、圖示、比例條；命令列工具加上標籤，和同名的 App 區分。
+    private func nameCell(_ app: AppUsage) -> some View {
+        let maxTotal = max(1, apps.first?.bytes.total ?? 1)
+        let isCommandLine = !(app.path?.hasSuffix(".app") ?? false)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                AppIconView(path: app.path, size: 16)
+                Text(app.name).lineLimit(1).truncationMode(.middle)
+                if isCommandLine {
+                    Text("命令列")
+                        .font(.caption2)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(theme.secondary.opacity(0.18), in: Capsule())
+                        .foregroundStyle(theme.secondary)
+                }
             }
+            GeometryReader { proxy in
+                let width = proxy.size.width * CGFloat(Double(app.bytes.total) / Double(maxTotal))
+                let rxShare = app.bytes.total > 0 ? CGFloat(Double(app.bytes.rx) / Double(app.bytes.total)) : 0
+                HStack(spacing: 0) {
+                    Rectangle().fill(theme.download).frame(width: width * rxShare)
+                    Rectangle().fill(theme.upload).frame(width: width * (1 - rxShare))
+                }
+            }
+            .frame(height: 3)
+            .padding(.leading, 22)
         }
-        .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload])
-        .chartXAxisLabel("MB")
-        .chartYScale(domain: top.map(\.name))
+        .help(app.path ?? app.name)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isCommandLine ? "\(app.name)，命令列工具" : app.name)
     }
 
     /// 預設風格用原本的系統表格；Hack／Glass 用實心表頭的自訂表格，才能配合深色或透明背景。
@@ -74,31 +93,22 @@ struct AppsView: View {
     private var systemTable: some View {
         let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
         return Table(apps) {
-            TableColumn("程式") { app in
-                HStack(spacing: 6) {
-                    AppIconView(path: app.path, size: 16)
-                    Text(app.name).lineLimit(1)
-                }
-            }
-            .width(min: 180)
-            TableColumn("下載") { Text(settings.format($0.bytes.rx)).monospacedDigit() }
-            TableColumn("上傳") { Text(settings.format($0.bytes.tx)).monospacedDigit() }
-            TableColumn("合計") { Text(settings.format($0.bytes.total)).monospacedDigit() }
+            TableColumn("程式") { app in nameCell(app) }
+            .width(min: 220)
+            TableColumn("下載") { Text(settings.format($0.bytes.rx)).monospacedDigit() }.alignment(.numeric)
+            TableColumn("上傳") { Text(settings.format($0.bytes.tx)).monospacedDigit() }.alignment(.numeric)
+            TableColumn("合計") { Text(settings.format($0.bytes.total)).monospacedDigit() }.alignment(.numeric)
             TableColumn("佔比") { app in
                 Text(String(format: "%.1f%%", Double(app.bytes.total) / sum * 100)).monospacedDigit()
             }
+            .alignment(.numeric)
         }
     }
 
     private var plainTable: some View {
         let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
         return PlainTable(rows: apps, columns: [
-            PlainColumn("程式") { app in
-                HStack(spacing: 6) {
-                    AppIconView(path: app.path, size: 16)
-                    Text(app.name)
-                }
-            },
+            PlainColumn("程式") { app in nameCell(app) },
             PlainColumn("下載", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.rx)) },
             PlainColumn("上傳", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.tx)) },
             PlainColumn("合計", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.total)) },

@@ -29,12 +29,15 @@ struct PlainTable<Row: Identifiable>: View {
                 Section {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                         line { $0.cell(row) }
+                            .accessibilityElement(children: .combine)
                             .font(.callout.monospacedDigit())
                             .padding(.vertical, 5)
                             .background(index.isMultiple(of: 2) ? Color.clear : stripe)
                     }
                 } header: {
                     line { column in AnyView(Text(column.title)) }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(.isHeader)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(theme.isHack ? theme.accent : .secondary)
                         .padding(.vertical, 6)

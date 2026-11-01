@@ -26,6 +26,7 @@ struct TodayView: View {
 
     /// 要看的網路：空字串 = 目前的網路，`allNetworks` = 全部合計，其他為網路 id。
     @State private var selection = ""
+    @AppStorage("onboardingDismissed") private var onboardingDismissed = false
     @State private var cumulative: [CumulativePoint] = []
     @State private var bars: [BarPoint] = []
 
@@ -65,7 +66,9 @@ struct TodayView: View {
         let scope = scope
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                if !onboardingDismissed { onboarding }
                 networkPicker
+                hero(scope)
                 tiles(scope)
                 if collector.networkUsages.count > 1 {
                     section("今日各網路") {
@@ -88,6 +91,21 @@ struct TodayView: View {
         .task(id: "\(collector.dataVersion)-\(selection)-\(collector.focusNetworkID ?? "")") { reload() }
     }
 
+    private var onboarding: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "menubar.rectangle").font(.title2).foregroundStyle(theme.accent)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("NetQuota 會常駐在選單列").font(.headline)
+                Text("如果選單列太滿、圖示被瀏海擋住，可以用 Spotlight 搜尋「NetQuota」打開這個視窗；也可以在系統設定 → 選單列關掉用不到的項目。")
+                    .font(.callout).foregroundStyle(theme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("知道了") { onboardingDismissed = true }
+        }
+        .themedCard()
+    }
+
     private var networkPicker: some View {
         HStack {
             Picker("網路", selection: $selection) {
@@ -103,46 +121,79 @@ struct TodayView: View {
         }
     }
 
-    private func tiles(_ scope: Scope) -> some View {
-        let peak = collector.peak
-        return VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                StatTile(title: "今日已用", value: settings.format(scope.used),
-                         detail: scope.quota.map { "\(Int((scope.fraction * 100).rounded()))%（上限 \(settings.format($0))）" }
-                             ?? "未設定上限",
-                         tint: scope.quota == nil ? nil : theme.forFraction(scope.fraction))
-                StatTile(title: "剩餘", value: scope.remaining.map { settings.format($0) } ?? "不限制",
-                         detail: "\(collector.dayEnd.shortTime) 歸零")
-                StatTile(title: "下載", value: settings.format(scope.bytes.rx), tint: theme.download)
-                StatTile(title: "上傳", value: settings.format(scope.bytes.tx), tint: theme.upload)
+    /// 主要指標：這個 App 要回答的問題——還剩多少、今天會不會超過。
+    private func hero(_ scope: Scope) -> some View {
+        HStack(alignment: .center, spacing: 22) {
+            UsageRing(fraction: scope.fraction, usedText: settings.format(scope.used),
+                      quotaText: scope.quota.map { settings.format($0) }, lineWidth: 11)
+                .frame(width: 118, height: 118)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(scope.remaining.map { "剩 \(settings.format($0))" } ?? "今日 \(settings.format(scope.used))")
+                    .font(.system(size: 30, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.isHack ? theme.accent : .primary)
+                    .glow()
+                Text(scope.quota.map {
+                    "已用 \(settings.format(scope.used)) / 上限 \(settings.format($0)) · \(Int((scope.fraction * 100).rounded()))%"
+                } ?? "\(scope.name) 沒有設定上限")
+                    .font(.callout).monospacedDigit().foregroundStyle(theme.secondary)
+                status(scope)
+                Text(methodText(scope) + " · \(collector.dayEnd.shortTime) 歸零")
+                    .font(.caption).foregroundStyle(theme.secondary)
             }
-            HStack(spacing: 10) {
-                // 峰值為所有網路合計的速率。
-                StatTile(title: "下載峰值", value: settings.formatRate(peak.rxRate), detail: peak.rxAt.map { "於 \($0.shortTime)" })
-                StatTile(title: "上傳峰值", value: settings.formatRate(peak.txRate), detail: peak.txAt.map { "於 \($0.shortTime)" })
-                StatTile(title: "預估今日總量", value: scope.forecast.map { settings.format($0.projectedTotal) } ?? "—",
-                         detail: scope.forecast.map { "近期 \(settings.formatRate($0.rate))" },
-                         tint: (scope.forecast?.projectedTotal ?? 0) > (scope.quota ?? .infinity) ? theme.warn : nil)
-                exhaustTile(scope)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .themedCard(padding: 16)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// 狀態句：除了顏色也用圖示表示，色盲也分得出來。
+    @ViewBuilder
+    private func status(_ scope: Scope) -> some View {
+        Group {
+            if let quota = scope.quota, scope.used >= quota {
+                Label("已超過上限 \(settings.format(scope.used - quota))", systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(theme.bad)
+            } else if scope.quota == nil {
+                Label("只記錄、不提醒", systemImage: "infinity").foregroundStyle(theme.secondary)
+            } else if let forecast = scope.forecast {
+                if let exceedAt = forecast.exceedAt {
+                    Label("照目前趨勢，預計 \(exceedAt.shortTime) 超過上限", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(theme.warn)
+                } else {
+                    Label("照目前趨勢今天約用 \(settings.format(forecast.projectedTotal))，不會超過",
+                          systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(theme.good)
+                }
+            } else if scope.networkID != collector.focusNetworkID {
+                Label("只預測目前所在的網路", systemImage: "info.circle").foregroundStyle(theme.secondary)
+            } else {
+                Label("收集資料中，約 2 分鐘後顯示預測", systemImage: "hourglass").foregroundStyle(theme.secondary)
             }
+        }
+        .font(.callout.weight(.medium))
+        .glow()
+    }
+
+    private func methodText(_ scope: Scope) -> String {
+        switch scope.forecast?.method {
+        case .history(let days): "依過去 \(days) 天同時段推估"
+        case .recentRate: "依最近 30 分鐘的速度推估（歷史不足 3 天）"
+        case nil: "今日"
         }
     }
 
-    private func exhaustTile(_ scope: Scope) -> StatTile {
-        guard let quota = scope.quota else {
-            return StatTile(title: "預計用完", value: "—", detail: "沒有設定上限")
+    /// 次要數字。
+    private func tiles(_ scope: Scope) -> some View {
+        let peak = collector.peak
+        return HStack(spacing: 10) {
+            StatTile(title: "下載", value: settings.format(scope.bytes.rx), tint: theme.download)
+            StatTile(title: "上傳", value: settings.format(scope.bytes.tx), tint: theme.upload)
+            // 峰值為所有網路合計的速率。
+            StatTile(title: "下載峰值", value: settings.formatRate(peak.rxRate), detail: peak.rxAt.map { "於 \($0.shortTime)" })
+            StatTile(title: "上傳峰值", value: settings.formatRate(peak.txRate), detail: peak.txAt.map { "於 \($0.shortTime)" })
         }
-        if scope.used >= quota {
-            return StatTile(title: "預計用完", value: "已超過", tint: theme.bad)
-        }
-        guard let forecast = scope.forecast else {
-            return StatTile(title: "預計用完", value: "—",
-                            detail: scope.networkID == collector.focusNetworkID ? "收集約 2 分鐘資料後顯示" : "只預測目前所在的網路")
-        }
-        if let exceedAt = forecast.exceedAt {
-            return StatTile(title: "預計用完", value: exceedAt.shortTime, detail: "照目前速度", tint: theme.bad)
-        }
-        return StatTile(title: "預計用完", value: "今天不會", detail: "照目前速度", tint: theme.good)
     }
 
     private func cumulativeChart(_ scope: Scope) -> some View {
@@ -163,7 +214,13 @@ struct TodayView: View {
             }
         }
         .chartXScale(domain: collector.dayStart...collector.dayEnd)
+        // 刻度上限取上限、預測與實際值中最大的，留一點空間，曲線不會擠在底部。
+        .chartYScale(domain: 0...max(0.5, max(scope.quota ?? 0, scope.forecast?.projectedTotal ?? 0, scope.used)
+            * 1.1 / settings.bytesPerGB))
         .chartYAxisLabel(settings.binaryUnits ? "GiB" : "GB")
+        .accessibilityLabel("今日累積用量")
+        .accessibilityValue(scope.forecast.map { "目前 \(settings.format(scope.used))，預估今天 \(settings.format($0.projectedTotal))" }
+            ?? "目前 \(settings.format(scope.used))")
         .chartXAxis {
             AxisMarks(values: .stride(by: .hour, count: 3)) { _ in
                 AxisGridLine()
@@ -182,6 +239,8 @@ struct TodayView: View {
         .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload])
         .chartXScale(domain: collector.dayStart...collector.dayEnd)
         .chartYAxisLabel("MB")
+        .accessibilityLabel("每 \(Self.barMinutes) 分鐘用量")
+        .accessibilityValue("今天共 \(bars.count / 2) 個時段有用量")
         .chartXAxis {
             AxisMarks(values: .stride(by: .hour, count: 3)) { _ in
                 AxisGridLine()
@@ -213,8 +272,12 @@ struct TodayView: View {
         // 最後一點用即時數字，包含尚未寫入資料庫的這一分鐘。
         points.append(CumulativePoint(date: now, value: scope.used, series: "實際"))
         if let forecast = scope.forecast {
+            // 預測曲線從目前的實際值接續（曲線第一點是預測當下的值，可能比畫面上的即時值早幾秒）。
             points.append(CumulativePoint(date: now, value: scope.used, series: "預測"))
-            points.append(CumulativePoint(date: collector.dayEnd, value: forecast.projectedTotal, series: "預測"))
+            for point in forecast.curve.dropFirst() where point.date > now {
+                points.append(CumulativePoint(date: point.date, value: point.total - forecast.curve[0].total + scope.used,
+                                              series: "預測"))
+            }
         }
         cumulative = points
 

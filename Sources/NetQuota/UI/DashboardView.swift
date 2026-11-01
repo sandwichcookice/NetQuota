@@ -190,7 +190,7 @@ struct DashboardView: View {
     }
 }
 
-/// 標題列右側的狀態：即時速度與目前網路今日用量（精簡顯示，滑鼠移上去看完整數字）。
+/// 標題列右側的狀態：即時速度與目前網路今日用量。
 /// 屬於控制層，所以用 Liquid Glass；多個玻璃元件放在同一個 GlassEffectContainer。
 @available(macOS 26.0, *)
 private struct GlassStatusBar: View {
@@ -204,28 +204,29 @@ private struct GlassStatusBar: View {
 
     var body: some View {
         let usageColor: Color = collector.quota == nil ? .primary : theme.forFraction(collector.fraction)
-        let binary = settings.binaryUnits
-        let used = ByteFormat.compactGB(collector.used, binary: binary)
-        let usage = collector.quota.map { "\(used)/\(ByteFormat.compactGB($0, binary: binary))G" } ?? "\(used)G"
+        let usage = collector.quota.map { "\(settings.format(collector.used)) / \(settings.format($0))" }
+            ?? settings.format(collector.used)
         GlassEffectContainer(spacing: 6) {
             HStack(spacing: 6) {
                 HStack(spacing: 8) {
-                    Text("↓\(ByteFormat.compactRate(collector.rxRate))").foregroundStyle(theme.download)
-                    Text("↑\(ByteFormat.compactRate(collector.txRate))").foregroundStyle(theme.upload)
+                    Text("↓ \(settings.formatRate(collector.rxRate))").foregroundStyle(theme.download)
+                    Text("↑ \(settings.formatRate(collector.txRate))").foregroundStyle(theme.upload)
                 }
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .glassEffect(glass)
-                .help("下載 \(settings.formatRate(collector.rxRate))，上傳 \(settings.formatRate(collector.txRate))")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("下載 \(settings.formatRate(collector.rxRate))，上傳 \(settings.formatRate(collector.txRate))")
 
+                // 網路名稱在今日頁已經看得到，這裡只放圖示，名稱放在提示裡。
                 HStack(spacing: 5) {
                     Image(systemName: NetworkIcon.symbol(for: collector.currentNetwork?.interface))
-                    Text(collector.focusName).lineLimit(1)
                     Text(usage).foregroundStyle(usageColor)
                 }
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .glassEffect(glass.tint(collector.quota == nil ? nil : usageColor.opacity(0.18)))
-                .help(collector.quota.map { "今日 \(settings.format(collector.used)) / 上限 \(settings.format($0))" }
-                    ?? "今日 \(settings.format(collector.used))（沒有設定上限）")
+                .help("\(collector.focusName)：今日 \(usage)")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(collector.focusName) 今日用量 \(usage)")
             }
             .font(.callout.monospacedDigit())
         }

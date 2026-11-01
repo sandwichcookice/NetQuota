@@ -13,6 +13,7 @@ struct UsageRing: View {
 
     var body: some View {
         let color = quotaText == nil ? theme.secondary : theme.forFraction(fraction)
+        let spoken = quotaText.map { "已用 \(usedText)，上限 \($0)，\(Int((fraction * 100).rounded()))%" } ?? "已用 \(usedText)，沒有上限"
         let style = theme.isHack
             ? StrokeStyle(lineWidth: lineWidth, lineCap: .butt, dash: [3, 2])
             : StrokeStyle(lineWidth: lineWidth, lineCap: .round)
@@ -53,6 +54,9 @@ struct UsageRing: View {
                 }
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("今日用量")
+        .accessibilityValue(spoken)
     }
 }
 
@@ -107,10 +111,13 @@ struct StatTile: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             // 沒有附註時保留同樣高度，讓同一列的卡片對齊。
-            Text(detail ?? " ").font(.caption2).foregroundStyle(theme.secondary).lineLimit(1)
+            Text(detail ?? " ").font(.caption).foregroundStyle(theme.secondary).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .themedCard()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue([value, detail].compactMap { $0 }.joined(separator: "，"))
     }
 }
 
@@ -217,4 +224,18 @@ struct SectionTitle: View {
 
 extension Date {
     var shortTime: String { formatted(date: .omitted, time: .shortened) }
+    /// 全 App 統一的日期時間寫法，例如「11/2 01:48」。
+    var shortDateTime: String { "\(shortDate) \(formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute()))" }
+    /// 例如「11/2」。
+    var shortDate: String {
+        let parts = Calendar.current.dateComponents([.month, .day], from: self)
+        return "\(parts.month ?? 0)/\(parts.day ?? 0)"
+    }
+}
+
+/// "2026-11-02" → "11/2"
+func shortDayLabel(_ key: String) -> String {
+    let parts = key.split(separator: "-")
+    guard parts.count == 3, let month = Int(parts[1]), let day = Int(parts[2]) else { return key }
+    return "\(month)/\(day)"
 }

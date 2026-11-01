@@ -76,6 +76,44 @@ private func date(_ text: String) -> Date {
         #expect(forecast.exceedAt == date("2026-11-01 15:20"))
     }
 
+    @Test func historyProfileAvoidsNightOverProjection() {
+        // 凌晨 1 點最近很忙（每秒 0.5MB），但過去這個時段之後幾乎不用網路。
+        var hourly = [Double](repeating: 0, count: 24)
+        hourly[20] = 2e9
+        let profile = UsageProfile(hourly: hourly, days: 7)
+        let now = date("2026-11-02 01:00")
+        let end = date("2026-11-03 00:00")
+        let forecast = Forecast.make(used: 1e9, quota: 12e9, recentBytes: 0.5e6 * 1800, window: 1800,
+                                     now: now, dayEnd: end, profile: profile, calendar: taipei)!
+        // 30 分鐘 × 0.5MB/s = 0.9GB，加上 20 點那一小時的 2GB
+        #expect(abs(forecast.projectedTotal - 3.9e9) < 1e6)
+        #expect(forecast.method == .history(days: 7))
+        #expect(forecast.exceedAt == nil)
+        // 直線延伸的舊算法會得到 1 + 0.5MB × 23 小時 ≈ 42GB
+        let naive = Forecast.make(used: 1e9, quota: 12e9, recentBytes: 0.5e6 * 1800, window: 1800, now: now, dayEnd: end)!
+        #expect(naive.projectedTotal > 40e9)
+        #expect(naive.method == .recentRate)
+    }
+
+    @Test func historyProfileFindsExceedHour() {
+        var hourly = [Double](repeating: 0, count: 24)
+        hourly[21] = 6e9
+        let forecast = Forecast.make(used: 8e9, quota: 12e9, recentBytes: 0, window: 1800,
+                                     now: date("2026-11-02 18:00"), dayEnd: date("2026-11-03 00:00"),
+                                     profile: UsageProfile(hourly: hourly, days: 5), calendar: taipei)!
+        // 21 點開始每小時 6GB，還差 4GB → 21:40 超過
+        #expect(forecast.exceedAt == date("2026-11-02 21:40"))
+        #expect(forecast.curve.last?.date == date("2026-11-03 00:00"))
+    }
+
+    @Test func tooLittleHistoryFallsBackToRate() {
+        let forecast = Forecast.make(used: 0, quota: 12e9, recentBytes: 1e6 * 1800, window: 1800,
+                                     now: date("2026-11-02 12:00"), dayEnd: date("2026-11-03 00:00"),
+                                     profile: UsageProfile(hourly: [Double](repeating: 1, count: 24), days: 2),
+                                     calendar: taipei)!
+        #expect(forecast.method == .recentRate)
+    }
+
     @Test func noExceedWhenSlow() {
         let now = date("2026-11-01 23:00")
         let end = date("2026-11-02 00:00")
@@ -350,6 +388,22 @@ private func date(_ text: String) -> Date {
         #expect(dorm1.first?.total == 611)
         let phone1 = store.dailySummaries(from: date("2026-11-02 00:00"), to: date("2026-11-02 23:00"), policy: policy, network: "mac:bb")
         #expect(phone1.first?.total == 5)
+    }
+
+    @Test func usageProfileAveragesActiveDays() throws {
+        let store = try TrafficStore(path: ":memory:")
+        let policy = QuotaPolicy(quotaBytes: 0, resetHour: 0, calendar: taipei)
+        try store.addNetworkMinute(at: date("2026-10-30 20:10"), network: "mac:aa", ByteCounts(rx: 300, tx: 0))
+        try store.addNetworkMinute(at: date("2026-10-31 20:20"), network: "mac:aa", ByteCounts(rx: 100, tx: 0))
+        try store.addNetworkMinute(at: date("2026-10-31 08:00"), network: "mac:aa", ByteCounts(rx: 40, tx: 0))
+        try store.addNetworkMinute(at: date("2026-10-31 20:00"), network: "mac:bb", ByteCounts(rx: 999, tx: 0))
+        // 今天的資料不算
+        try store.addNetworkMinute(at: date("2026-11-02 20:00"), network: "mac:aa", ByteCounts(rx: 5000, tx: 0))
+        let profile = store.usageProfile(network: "mac:aa", before: date("2026-11-02 00:00"), policy: policy)
+        #expect(profile.days == 2)
+        #expect(profile.hourly[20] == 200)
+        #expect(profile.hourly[8] == 20)
+        #expect(!profile.isUsable)
     }
 
     @Test func backfillsLegacyDataOnce() throws {

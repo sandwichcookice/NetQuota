@@ -48,6 +48,7 @@ struct HistoryView: View {
 
     /// 空字串 = 全部網路，其他為網路 id。
     @State private var network = ""
+    @State private var didChooseDefaultNetwork = false
     @State private var span: Span = .month
     @State private var grouping: Grouping = .day
     @State private var rows: [Row] = []
@@ -79,6 +80,12 @@ struct HistoryView: View {
         }
         .padding(20)
         .task(id: "\(span.rawValue)-\(grouping.rawValue)-\(network)-\(collector.dataVersion)") { reload() }
+        // 預設看目前所在的網路，「超過上限的天數」才有意義。
+        .onAppear {
+            guard !didChooseDefaultNetwork else { return }
+            didChooseDefaultNetwork = true
+            network = collector.focusNetworkID ?? ""
+        }
     }
 
     /// 選定網路的每日上限；全部網路或沒設定時為 nil。
@@ -128,12 +135,15 @@ struct HistoryView: View {
             }
         }
         .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload, "校正": Color.gray])
+        .accessibilityLabel("每\(grouping.rawValue)用量")
+        .accessibilityValue(rows.map { "\($0.label) \(settings.format($0.total))" }.joined(separator: "，"))
         .chartYAxisLabel(settings.binaryUnits ? "GiB" : "GB")
         .chartXAxis {
             AxisMarks { value in
                 AxisValueLabel {
                     if let label = value.as(String.self) {
-                        Text(rows.count > 14 && grouping == .day ? String(label.suffix(2)) : label)
+                        // 天數多時只顯示「日」，避免標籤擠在一起。
+                        Text(rows.count > 14 && grouping == .day ? String(label.split(separator: "/").last ?? "") : label)
                     }
                 }
             }
@@ -151,14 +161,15 @@ struct HistoryView: View {
             TableColumn(grouping == .day ? "日期" : "期間") { row in
                 Text(row.label).foregroundStyle(isOver(row) ? theme.bad : .primary)
             }
-            TableColumn("下載") { Text(settings.format($0.rx)).monospacedDigit() }
-            TableColumn("上傳") { Text(settings.format($0.tx)).monospacedDigit() }
+            TableColumn("下載") { Text(settings.format($0.rx)).monospacedDigit() }.alignment(.numeric)
+            TableColumn("上傳") { Text(settings.format($0.tx)).monospacedDigit() }.alignment(.numeric)
             TableColumn("合計") { row in
                 Text(settings.format(row.total)).monospacedDigit()
                     .foregroundStyle(isOver(row) ? theme.bad : .primary)
             }
-            TableColumn("下載峰值") { Text(settings.formatRate($0.peakRx)).monospacedDigit() }
-            TableColumn("上傳峰值") { Text(settings.formatRate($0.peakTx)).monospacedDigit() }
+            .alignment(.numeric)
+            TableColumn("下載峰值") { Text(settings.formatRate($0.peakRx)).monospacedDigit() }.alignment(.numeric)
+            TableColumn("上傳峰值") { Text(settings.formatRate($0.peakTx)).monospacedDigit() }.alignment(.numeric)
         }
     }
 
@@ -196,7 +207,7 @@ struct HistoryView: View {
         }
 
         let daily = summaries.map { summary in
-            Row(id: summary.day, label: summary.day, start: summary.start,
+            Row(id: summary.day, label: shortDayLabel(summary.day), start: summary.start,
                 rx: Double(summary.bytes.rx), tx: Double(summary.bytes.tx), calibration: summary.calibration,
                 peakRx: summary.peak?.rxRate ?? 0, peakTx: summary.peak?.txRate ?? 0, days: 1)
         }
@@ -204,12 +215,7 @@ struct HistoryView: View {
 
         switch grouping {
         case .day:
-            // 圖表與表格只顯示 "11-01"。
-            rows = daily.map { row in
-                var copy = row
-                copy.label = String(row.label.dropFirst(5))
-                return copy
-            }
+            rows = daily
         case .week, .month:
             let calendar = Calendar.current
             var grouped: [Row] = []
@@ -220,7 +226,7 @@ struct HistoryView: View {
                     let parts = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: row.start)
                     key = "\(parts.yearForWeekOfYear ?? 0)-W\(parts.weekOfYear ?? 0)"
                     let weekStart = calendar.dateInterval(of: .weekOfYear, for: row.start)?.start ?? row.start
-                    label = weekStart.formatted(.dateTime.month(.defaultDigits).day()) + " 週"
+                    label = "\(weekStart.shortDate) 起"
                 } else {
                     let parts = calendar.dateComponents([.year, .month], from: row.start)
                     key = String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
