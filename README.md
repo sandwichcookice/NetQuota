@@ -20,6 +20,8 @@ swift test                                                        # 單元測試
 export NETQUOTA_BUNDLE_ID=com.example.NetQuota
 ```
 
+App 的版本號會自動取自最近的 git tag（例如 `v1.1` → 1.1），下載 zip 等沒有 git 資訊的原始碼會顯示 0.0。
+
 需求：macOS 15 以上、Xcode（Swift 6）。不需要 root 權限，也沒有第三方依賴。
 
 打包時用 ad-hoc 簽章（不需要 Apple 開發者帳號），在自己的電腦上編譯就能直接執行，不會被 Gatekeeper 擋下。

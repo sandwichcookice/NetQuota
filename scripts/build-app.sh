@@ -36,6 +36,19 @@ if [[ ! "$BUNDLE_ID" =~ '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$' ]]; then
 fi
 
 ROOT="${0:A:h:h}"
+
+# App 版本號取自目前 commit 已包含的最大版本 tag（v1.1 → 1.1）。
+# 不是從 git 取得原始碼（例如下載 zip）時用 0.0；放在別的 git 專案底下時也不讀那個專案的 tag。
+VERSION=""
+if [[ "$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" == "$ROOT" ]]; then
+    VERSION="$(git -C "$ROOT" tag --merged HEAD --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+fi
+VERSION="${VERSION#v}"
+if [[ ! "$VERSION" =~ '^[0-9]+(\.[0-9]+){0,2}$' ]]; then
+    echo "找不到版本 tag，版本號使用 0.0" >&2
+    VERSION="0.0"
+fi
+
 APP="$ROOT/build/NetQuota.app"
 cd "$ROOT"
 
@@ -75,7 +88,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>APP_VERSION</string>
     <key>CFBundleVersion</key>
     <string>BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key>
@@ -93,12 +106,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # 每次打包用不同的版本號，系統與 Dock 才會重新讀取圖示，不會沿用舊的快取。
-/usr/bin/sed -i '' -e "s/BUILD_NUMBER/$(date +%Y%m%d%H%M%S)/" -e "s/BUNDLE_ID/$BUNDLE_ID/" "$APP/Contents/Info.plist"
+/usr/bin/sed -i '' -e "s/BUILD_NUMBER/$(date +%Y%m%d%H%M%S)/" -e "s/BUNDLE_ID/$BUNDLE_ID/" \
+    -e "s/APP_VERSION/$VERSION/" "$APP/Contents/Info.plist"
 
 # ad-hoc 簽章預設用 cdhash 當身分，每次打包都會變，系統就會重新詢問定位等權限。
 # 把身分指定為 Bundle ID，重新打包後系統會沿用之前的授權。
 codesign --force --sign - -r="designated => identifier \"$BUNDLE_ID\"" "$APP"
-echo "已產生 $APP（$BUNDLE_ID）"
+echo "已產生 $APP（$BUNDLE_ID，版本 $VERSION）"
 
 if (( INSTALL )); then
     pkill -x NetQuota 2>/dev/null || true
