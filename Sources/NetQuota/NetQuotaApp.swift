@@ -81,8 +81,19 @@ struct NetQuotaApp: App {
     /// 直接觀察設定，選單列開關才會即時生效。
     @StateObject private var settings = AppModel.shared.settings
 
+    /// 系統放入或移除選單列圖示時會回寫這個值。即使值沒變，寫入也會觸發設定更新、
+    /// 讓整個 App 重建畫面、再回寫一次，變成無窮循環（App 卡死、記憶體一直漲），
+    /// 所以只有值真的不同時才寫入。
+    private var menuBarInserted: Binding<Bool> {
+        Binding(
+            get: { settings.showMenuBarItem },
+            set: { newValue in
+                if settings.showMenuBarItem != newValue { settings.showMenuBarItem = newValue }
+            })
+    }
+
     var body: some Scene {
-        MenuBarExtra(isInserted: $settings.showMenuBarItem) {
+        MenuBarExtra(isInserted: menuBarInserted) {
             ThemedRoot(settings: model.settings) {
                 PopoverView()
             }
