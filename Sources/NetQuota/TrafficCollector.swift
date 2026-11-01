@@ -56,7 +56,6 @@ final class TrafficCollector: ObservableObject {
 
     private var lastRaw: [String: ByteCounts] = [:]
     private var lastSample: Date?
-    private var startedAt = Date()
     private var bootTime: Int64 = 0
     private var pendingMinute: (date: Date, record: MinuteRecord, interfaces: [String: UInt64],
                                 networks: [String: ByteCounts])?
@@ -67,7 +66,8 @@ final class TrafficCollector: ObservableObject {
     private var pendingAppSamples: [AppSample] = []
     private var appTotals: [String: ByteCounts] = [:]
     private var appPaths: [String: String] = [:]
-    private var forecastWindow: [(date: Date, bytes: UInt64, network: String?)] = []
+    /// 最近 30 分鐘的取樣：增量、所在網路、實際監測秒數（跨睡眠的那筆只算一個取樣間隔）。
+    private var forecastWindow: [(date: Date, bytes: UInt64, network: String?, observed: Double)] = []
     private var spikeWindow: [String: [(date: Date, bytes: UInt64)]] = [:]
     private var lastResolverPrune = Date()
     private var lastRoute: (interface: String, router: String)?
@@ -115,9 +115,9 @@ final class TrafficCollector: ObservableObject {
         networks = store.networks()
         focusNetworkID = store.state("focusNetwork")
         bootTime = InterfaceCounter.bootTime()
-        startedAt = Date()
         refreshNetwork()
         recoverGap()
+        seedForecastWindow()
         reloadToday()
 
         schedule(every: 2) { $0.tick() }
@@ -272,7 +272,7 @@ final class TrafficCollector: ObservableObject {
         lastRaw = raw
         lastSample = now
 
-        forecastWindow.append((now, delta.total, network))
+        forecastWindow.append((now, delta.total, network, awake ? dt : 2))
         let cutoff = now.addingTimeInterval(-Self.forecastSpan)
         if let index = forecastWindow.firstIndex(where: { $0.date > cutoff }), index > 0 {
             forecastWindow.removeFirst(index)
@@ -365,9 +365,19 @@ final class TrafficCollector: ObservableObject {
             forecast = nil
             return
         }
-        let span = min(Self.forecastSpan, now.timeIntervalSince(startedAt))
+        // 用實際監測的時間當分母：App 關閉或睡眠的空檔不算，重開後也能接續之前的資料。
+        let span = min(Self.forecastSpan, forecastWindow.reduce(0.0) { $0 + $1.observed })
         let recent = forecastWindow.reduce(0.0) { $0 + ($1.network == focusNetworkID ? Double($1.bytes) : 0) }
         forecast = Forecast.make(used: used, quota: quota, recentBytes: recent, window: span, now: now, dayEnd: dayEnd)
+    }
+
+    /// 啟動時從資料庫讀回最近 30 分鐘的原始樣本，重開 App 後不必重新累積就有預測。
+    /// App 關閉期間的補算流量只存在每分鐘彙總裡，不會被算進速率。
+    private func seedForecastWindow(now: Date = Date()) {
+        forecastWindow = []
+        store.forEachSample(from: now.addingTimeInterval(-Self.forecastSpan), to: now) { sample in
+            forecastWindow.append((sample.time, sample.bytes.total, sample.network, sample.awake ? sample.dt : 2))
+        }
     }
 
     // MARK: - 資料庫
