@@ -499,3 +499,40 @@ private func date(_ text: String) -> Date {
         #expect(apps.contains("\"a,b\",7,3,0,"))
     }
 }
+
+@Suite struct AppVersionTests {
+    @Test func parsing() {
+        #expect(AppVersion("v1.2") == AppVersion(major: 1, minor: 2))
+        #expect(AppVersion("1.2.1") == AppVersion(major: 1, minor: 2, patch: 1))
+        #expect(AppVersion("v2") == AppVersion(major: 2, minor: 0))
+        #expect(AppVersion("v1.2-beta") == nil)
+        #expect(AppVersion("v1..2") == nil)
+        #expect(AppVersion("v1.2.3.4") == nil)
+        #expect(AppVersion("") == nil)
+        #expect(AppVersion("v1.2")?.description == "1.2")
+        #expect(AppVersion("v1.2.1")?.tag == "v1.2.1")
+    }
+
+    @Test func ordering() {
+        let v = { AppVersion($0)! }
+        #expect(v("1.2") < v("1.2.1"))
+        #expect(v("1.2.2") < v("1.2.10"))
+        #expect(v("1.9") < v("1.10"))
+        #expect(v("1.10") < v("2.0"))
+        #expect(v("1.2") == v("1.2.0"))
+        #expect(v("1.2.1").isPatchUpdate(from: v("1.2")))
+        #expect(!v("1.3").isPatchUpdate(from: v("1.2")))
+    }
+
+    @Test func latestFromLsRemote() {
+        let output = """
+            aaa\trefs/tags/v1.0
+            bbb\trefs/tags/v1.10
+            ccc\trefs/tags/v1.2.1
+            ddd\trefs/tags/v2.0-rc1
+            eee\trefs/tags/release-9
+            """
+        #expect(AppVersion.latest(fromLsRemote: output) == AppVersion("1.10"))
+        #expect(AppVersion.latest(fromLsRemote: "") == nil)
+    }
+}

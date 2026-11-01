@@ -97,6 +97,10 @@ struct SettingsView: View {
                 }
             }
 
+            Section("更新") {
+                UpdateSection(updates: model.updates)
+            }
+
             Section("資料") {
                 HStack {
                     ExportMenu()
@@ -144,6 +148,75 @@ struct SettingsView: View {
             launchError = "設定失敗：\(error.localizedDescription)（請先把 NetQuota.app 放到「應用程式」資料夾再試）"
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+/// 版本、檢查更新與一鍵更新。
+private struct UpdateSection: View {
+    @ObservedObject var updates: UpdateManager
+    @State private var confirming: AppVersion?
+
+    var body: some View {
+        if updates.isAvailable {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("目前版本 \(updates.current?.tag ?? "未知")")
+                    status.font(.caption)
+                    if let lastChecked = updates.lastChecked {
+                        Text("上次檢查：\(lastChecked.shortDateTime)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if case .updating = updates.state {
+                    ProgressView().controlSize(.small)
+                } else if case .available(let version) = updates.state {
+                    Button("更新到 \(version.tag)") { confirming = version }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("檢查更新") { Task { await updates.check() } }
+                        .disabled(updates.isBusy)
+                }
+            }
+            .confirmationDialog("更新到 \(confirming?.tag ?? "")？", isPresented: confirmationShown, presenting: confirming) { version in
+                Button("更新並重新啟動") { Task { await updates.update(to: version) } }
+                Button("取消", role: .cancel) {}
+            } message: { _ in
+                Text("會在原始碼資料夾抓取新版本並重新編譯（約 1–2 分鐘），期間 NetQuota 照常記錄；完成後會自動重新啟動。")
+            }
+            Toggle("每天自動檢查新版本並通知", isOn: $updates.autoCheck)
+            Text("更新時會在原始碼資料夾抓取新版本、重新編譯並安裝，完成後 NetQuota 會自動重新啟動。原始碼資料夾有尚未 commit 的修改時不會更新。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let source = updates.sourceDirectory {
+                HStack {
+                    Text(source.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Spacer()
+                    if let log = updates.logURL, FileManager.default.fileExists(atPath: log.path) {
+                        Button("更新紀錄") { NSWorkspace.shared.open(log) }
+                    }
+                }
+            }
+        } else {
+            Text("目前版本 \(updates.current?.tag ?? "未知")")
+            Text("這份 App 不是從 git clone 的原始碼用 scripts/build-app.sh 打包的，無法自動更新。請用 git clone 下載原始碼後重新打包。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch updates.state {
+        case .idle: Text("尚未檢查").foregroundStyle(.secondary)
+        case .checking: Text("正在檢查…").foregroundStyle(.secondary)
+        case .upToDate: Label("已是最新版本", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+        case .available(let version):
+            Label("有\(updates.describe(version))", systemImage: "arrow.down.circle").foregroundStyle(.blue)
+        case .updating(let step): Text(step).foregroundStyle(.secondary)
+        case .failed(let message): Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+        }
+    }
+
+    var confirmationShown: Binding<Bool> {
+        Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })
     }
 }
 

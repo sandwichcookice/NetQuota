@@ -34,6 +34,7 @@ struct PopoverView: View {
             divider
             topApps
             divider
+            UpdateBanner(updates: model.updates)
             footer
         }
         .padding(16)
@@ -213,6 +214,25 @@ struct PopoverView: View {
             Button("結束") { NSApp.terminate(nil) }
         }
         .modifier(FooterButtonStyle())
+    }
+}
+
+/// 有新版本時顯示一行提示，點了打開設定頁的更新區。
+private struct UpdateBanner: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var updates: UpdateManager
+
+    var body: some View {
+        if case .available(let version) = updates.state {
+            Button {
+                model.showDashboard(.settings)
+            } label: {
+                Label("有\(updates.describe(version))，到設定更新", systemImage: "arrow.down.circle")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.blue)
+        }
     }
 }
 

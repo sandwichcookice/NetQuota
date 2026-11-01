@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     let collector: TrafficCollector
     let databaseURL: URL?
     let backups: BackupManager?
+    let updates = UpdateManager()
     @Published var storageError: String?
     @Published var dashboardTab: DashboardTab = .today
     /// 由 MenuBarLabel 接收並開啟儀表板視窗（openWindow 只能在 SwiftUI view 裡呼叫）。
@@ -45,6 +46,7 @@ final class AppModel: ObservableObject {
         backups = url.map { BackupManager(store: store, databaseURL: $0) }
         collector.start()
         backups?.start()
+        updates.start()
         // 第一次啟動：選單列圖示可能被瀏海擋住，直接打開儀表板並說明。
         if !UserDefaults.standard.bool(forKey: "onboardingDismissed") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.showDashboard(.today) }
