@@ -9,9 +9,15 @@ Mac 選單列網路流量監測工具。宿舍網路一天（上傳＋下載合�
 ```bash
 git clone https://github.com/sandwichcookice/NetQuota.git
 cd NetQuota
-scripts/build-app.sh             # 產生 build/NetQuota.app
-scripts/build-app.sh --install   # 另外複製到 /Applications 並啟動
-swift test                       # 單元測試
+scripts/build-app.sh --bundle-id com.example.NetQuota             # 產生 build/NetQuota.app
+scripts/build-app.sh --bundle-id com.example.NetQuota --install   # 另外複製到 /Applications 並啟動
+swift test                                                        # 單元測試
+```
+
+`--bundle-id` 是必填的，請換成你自己的反向網域 ID（例如 `io.github.<你的帳號>.NetQuota`）。之後每次打包都要用同一個 ID，系統才會沿用定位與通知權限、讀到同一份設定。不想每次輸入的話，可以在 `~/.zshrc` 加上：
+
+```bash
+export NETQUOTA_BUNDLE_ID=com.example.NetQuota
 ```
 
 需求：macOS 15 以上、Xcode（Swift 6）。不需要 root 權限，也沒有第三方依賴。

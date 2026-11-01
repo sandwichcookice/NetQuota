@@ -1,8 +1,39 @@
 #!/bin/zsh
 # 編譯 release 版並組成 build/NetQuota.app。
-#   scripts/build-app.sh            只打包
-#   scripts/build-app.sh --install  打包後複製到 /Applications 並啟動
+#   scripts/build-app.sh --bundle-id com.example.NetQuota            只打包
+#   scripts/build-app.sh --bundle-id com.example.NetQuota --install  打包後複製到 /Applications 並啟動
+# Bundle ID 也可以用環境變數 NETQUOTA_BUNDLE_ID 指定；兩者都有時以引數為準。
 set -euo pipefail
+
+usage() {
+    echo "用法：scripts/build-app.sh --bundle-id <反向網域 ID> [--install]" >&2
+    echo "  例如：scripts/build-app.sh --bundle-id com.example.NetQuota --install" >&2
+    echo "  也可以先 export NETQUOTA_BUNDLE_ID=com.example.NetQuota" >&2
+}
+
+BUNDLE_ID="${NETQUOTA_BUNDLE_ID:-}"
+INSTALL=0
+while (( $# > 0 )); do
+    case "$1" in
+        --install) INSTALL=1 ;;
+        --bundle-id) (( $# >= 2 )) || { usage; exit 1; }; BUNDLE_ID="$2"; shift ;;
+        --bundle-id=*) BUNDLE_ID="${1#*=}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "不認得的引數：$1" >&2; usage; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -z "$BUNDLE_ID" ]]; then
+    echo "請指定 Bundle ID。" >&2
+    usage
+    exit 1
+fi
+# 只允許英數、點與連字號，且至少要有一個點（例如 com.example.NetQuota）。
+if [[ ! "$BUNDLE_ID" =~ '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$' ]]; then
+    echo "Bundle ID 格式不正確：$BUNDLE_ID（只能有英數、點與連字號，例如 com.example.NetQuota）" >&2
+    exit 1
+fi
 
 ROOT="${0:A:h:h}"
 APP="$ROOT/build/NetQuota.app"
@@ -25,7 +56,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>io.github.sandwichcookice.NetQuota</string>
+    <string>BUNDLE_ID</string>
     <key>CFBundleName</key>
     <string>NetQuota</string>
     <key>CFBundleDisplayName</key>
@@ -56,20 +87,20 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Personal use</string>
+    <string>MIT License</string>
 </dict>
 </plist>
 PLIST
 
 # 每次打包用不同的版本號，系統與 Dock 才會重新讀取圖示，不會沿用舊的快取。
-/usr/bin/sed -i '' "s/BUILD_NUMBER/$(date +%Y%m%d%H%M%S)/" "$APP/Contents/Info.plist"
+/usr/bin/sed -i '' -e "s/BUILD_NUMBER/$(date +%Y%m%d%H%M%S)/" -e "s/BUNDLE_ID/$BUNDLE_ID/" "$APP/Contents/Info.plist"
 
 # ad-hoc 簽章預設用 cdhash 當身分，每次打包都會變，系統就會重新詢問定位等權限。
 # 把身分指定為 Bundle ID，重新打包後系統會沿用之前的授權。
-codesign --force --sign - -r='designated => identifier "io.github.sandwichcookice.NetQuota"' "$APP"
-echo "已產生 $APP"
+codesign --force --sign - -r="designated => identifier \"$BUNDLE_ID\"" "$APP"
+echo "已產生 $APP（$BUNDLE_ID）"
 
-if [[ "${1:-}" == "--install" ]]; then
+if (( INSTALL )); then
     pkill -x NetQuota 2>/dev/null || true
     sleep 1
     rm -rf /Applications/NetQuota.app
