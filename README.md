@@ -4,13 +4,19 @@ Mac 選單列網路流量監測工具。宿舍網路一天（上傳＋下載合�
 
 ## 安裝與執行
 
+本專案只提供原始碼，不提供編譯好的 App，請自行打包：
+
 ```bash
+git clone https://github.com/sandwichcookice/NetQuota.git
+cd NetQuota
 scripts/build-app.sh             # 產生 build/NetQuota.app
 scripts/build-app.sh --install   # 另外複製到 /Applications 並啟動
 swift test                       # 單元測試
 ```
 
 需求：macOS 15 以上、Xcode（Swift 6）。不需要 root 權限，也沒有第三方依賴。
+
+打包時用 ad-hoc 簽章（不需要 Apple 開發者帳號），在自己的電腦上編譯就能直接執行，不會被 Gatekeeper 擋下。
 
 第一次啟動會詢問通知權限，請按「允許」。想開機自動執行，先用 `--install` 裝到「應用程式」，再到 設定 → 系統 → 登入時自動啟動。
 
@@ -89,3 +95,7 @@ Tests/NetQuotaTests/    單元測試
 Resources/AppIcon.icns  App 圖示（由 scripts/make-icon.swift 繪製，改設計後刪掉此檔再打包即可重新產生）
 scripts/build-app.sh    打包成 .app（ad-hoc 簽章、繁體中文在地化）
 ```
+
+## 授權
+
+[MIT](LICENSE)：可自由使用、修改、商用與再發布，只需保留版權聲明。
