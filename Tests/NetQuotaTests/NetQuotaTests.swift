@@ -1,0 +1,308 @@
+import Foundation
+import Testing
+@testable import NetQuotaCore
+
+private let taipei: Calendar = {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+    return calendar
+}()
+
+private func date(_ text: String) -> Date {
+    let formatter = DateFormatter()
+    formatter.calendar = taipei
+    formatter.timeZone = taipei.timeZone
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+    return formatter.date(from: text)!
+}
+
+@Suite struct QuotaPolicyTests {
+    @Test func midnightReset() {
+        let policy = QuotaPolicy(quotaBytes: 12e9, resetHour: 0, calendar: taipei)
+        let now = date("2026-11-01 15:30")
+        #expect(policy.dayStart(containing: now) == date("2026-11-01 00:00"))
+        #expect(policy.dayEnd(containing: now) == date("2026-11-02 00:00"))
+        #expect(policy.dayKey(for: now) == "2026-11-01")
+    }
+
+    @Test func nonMidnightReset() {
+        let policy = QuotaPolicy(quotaBytes: 12e9, resetHour: 6, calendar: taipei)
+        // 凌晨 3 點仍屬於前一天。
+        let early = date("2026-11-02 03:00")
+        #expect(policy.dayStart(containing: early) == date("2026-11-01 06:00"))
+        #expect(policy.dayKey(for: early) == "2026-11-01")
+        #expect(policy.dayEnd(containing: early) == date("2026-11-02 06:00"))
+        // 剛好 6 點是新的一天。
+        #expect(policy.dayKey(for: date("2026-11-02 06:00")) == "2026-11-02")
+    }
+
+    @Test func splitAcrossDaysIsProportional() {
+        let policy = QuotaPolicy(quotaBytes: 12e9, resetHour: 0, calendar: taipei)
+        let parts = policy.split(ByteCounts(rx: 3000, tx: 300), from: date("2026-11-01 22:00"), to: date("2026-11-02 04:00"))
+        #expect(parts.count == 2)
+        #expect(parts[0].start == date("2026-11-01 22:00"))
+        #expect(parts[0].bytes == ByteCounts(rx: 1000, tx: 100))
+        #expect(parts[1].start == date("2026-11-02 00:00"))
+        #expect(parts[1].bytes == ByteCounts(rx: 2000, tx: 200))
+    }
+
+    @Test func splitWithinOneDay() {
+        let policy = QuotaPolicy(quotaBytes: 12e9, resetHour: 0, calendar: taipei)
+        let parts = policy.split(ByteCounts(rx: 5, tx: 5), from: date("2026-11-01 10:00"), to: date("2026-11-01 11:00"))
+        #expect(parts.count == 1)
+        #expect(parts[0].bytes.total == 10)
+    }
+
+    @Test func quotaUnits() {
+        #expect(QuotaPolicy.quotaBytes(gb: 12, binary: false) == 12_000_000_000)
+        #expect(QuotaPolicy.quotaBytes(gb: 12, binary: true) == 12_884_901_888)
+    }
+}
+
+@Suite struct ForecastTests {
+    @Test func needsTwoMinutesOfData() {
+        #expect(Forecast.make(used: 0, quota: 1, recentBytes: 1, window: 60, now: Date(), dayEnd: Date()) == nil)
+    }
+
+    @Test func projectsAndFindsExceedTime() {
+        let now = date("2026-11-01 12:00")
+        let end = date("2026-11-02 00:00")
+        // 已用 6GB，最近 30 分鐘每秒 0.5MB → 12 小時再用 21.6GB。
+        let forecast = Forecast.make(used: 6e9, quota: 12e9, recentBytes: 0.5e6 * 1800, window: 1800, now: now, dayEnd: end)!
+        #expect(abs(forecast.projectedTotal - 27.6e9) < 1)
+        #expect(forecast.rate == 0.5e6)
+        // 剩 6GB ÷ 0.5MB/s = 12000 秒 = 3 小時 20 分。
+        #expect(forecast.exceedAt == date("2026-11-01 15:20"))
+    }
+
+    @Test func noExceedWhenSlow() {
+        let now = date("2026-11-01 23:00")
+        let end = date("2026-11-02 00:00")
+        let forecast = Forecast.make(used: 1e9, quota: 12e9, recentBytes: 1e6, window: 1800, now: now, dayEnd: end)!
+        #expect(forecast.exceedAt == nil)
+    }
+}
+
+@Suite struct CounterTests {
+    @Test func normalDelta() {
+        let delta = CounterMath.delta(previous: ["en0": ByteCounts(rx: 100, tx: 50)],
+                                      current: ["en0": ByteCounts(rx: 160, tx: 70)])
+        #expect(delta == ByteCounts(rx: 60, tx: 20))
+    }
+
+    @Test func counterResetCountsFromZero() {
+        let delta = CounterMath.delta(previous: ["en0": ByteCounts(rx: 5_000_000_000, tx: 50)],
+                                      current: ["en0": ByteCounts(rx: 300, tx: 10)])
+        #expect(delta == ByteCounts(rx: 300, tx: 10))
+    }
+
+    @Test func newInterfaceCountsFully() {
+        let delta = CounterMath.delta(previous: ["en0": ByteCounts(rx: 10, tx: 10)],
+                                      current: ["en0": ByteCounts(rx: 10, tx: 10), "en7": ByteCounts(rx: 40, tx: 2)])
+        #expect(delta == ByteCounts(rx: 40, tx: 2))
+    }
+
+    @Test func onlyPhysicalInterfacesCounted() {
+        #expect(InterfaceCounter.isCounted("en0"))
+        #expect(InterfaceCounter.isCounted("en5"))
+        #expect(!InterfaceCounter.isCounted("lo0"))
+        #expect(!InterfaceCounter.isCounted("utun3"))
+        #expect(!InterfaceCounter.isCounted("awdl0"))
+        #expect(!InterfaceCounter.isCounted("bridge0"))
+    }
+
+    @Test func readsRealCounters() {
+        // 這台 Mac 至少要有一個 en* 介面，且計數器不會倒退。
+        let first = InterfaceCounter.read()
+        #expect(!first.isEmpty)
+        let second = InterfaceCounter.read()
+        for (name, counts) in first {
+            #expect((second[name]?.rx ?? 0) >= counts.rx)
+        }
+        #expect(InterfaceCounter.bootTime() > 0)
+    }
+}
+
+@Suite struct NettopParserTests {
+    @Test func parsesLine() {
+        let sample = NettopParser.parseLine("Google Chrome H.1234,5013505,447,")
+        #expect(sample == ProcessSample(name: "Google Chrome H", pid: 1234, bytes: ByteCounts(rx: 5013505, tx: 447)))
+        #expect(NettopParser.parseLine("com.apple.WebKi.88,10,20,")?.name == "com.apple.WebKi")
+        #expect(NettopParser.parseLine(",bytes_in,bytes_out,") == nil)
+    }
+
+    @Test func dropsFirstCumulativeBlockAndSplitsChunks() {
+        var parser = NettopParser()
+        // pty 輸出：\r\n 換行、開頭有 ^D^H^H 控制字元，資料可能從任意位置被切開。
+        let stream = "\u{4}\u{8}\u{8},bytes_in,bytes_out,\r\napsd.370,292890,61828,\r\n"
+            + ",bytes_in,bytes_out,\r\nPython.37936,5013505,447,\r\nidle.1,0,0,\r\n"
+            + ",bytes_in,bytes_out,\r\nPython.37936,0,0,\r\n"
+            + ",bytes_in,bytes_out,\r\n"
+        var blocks: [[ProcessSample]] = []
+        var index = stream.startIndex
+        while index < stream.endIndex {
+            let end = stream.index(index, offsetBy: 7, limitedBy: stream.endIndex) ?? stream.endIndex
+            blocks += parser.feed(String(stream[index..<end]))
+            index = end
+        }
+        #expect(blocks.count == 2)
+        #expect(blocks[0] == [ProcessSample(name: "Python", pid: 37936, bytes: ByteCounts(rx: 5013505, tx: 447))])
+        #expect(blocks[1].isEmpty)
+    }
+}
+
+@Suite struct AppResolverTests {
+    @Test func outermostAppBundle() {
+        let identity = AppResolver.identity(forExecutablePath:
+            "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper")
+        #expect(identity.name == "Google Chrome")
+        #expect(identity.path == "/Applications/Google Chrome.app")
+    }
+
+    @Test func plainExecutable() {
+        let identity = AppResolver.identity(forExecutablePath: "/usr/bin/curl")
+        #expect(identity.name == "curl")
+    }
+}
+
+@Suite struct TrafficStoreTests {
+    @Test func aggregatesMinutesIntoDays() throws {
+        let store = try TrafficStore(path: ":memory:")
+        let policy = QuotaPolicy(quotaBytes: 12e9, resetHour: 6, calendar: taipei)
+        try store.addMinute(at: date("2026-11-01 05:59"), ByteCounts(rx: 100, tx: 1))
+        try store.addMinute(at: date("2026-11-01 06:00"), ByteCounts(rx: 200, tx: 2))
+        try store.addMinute(at: date("2026-11-01 06:00"), ByteCounts(rx: 50, tx: 0))
+        try store.addMinute(at: date("2026-11-02 05:00"), ByteCounts(rx: 300, tx: 3))
+        try store.setCalibration(day: "2026-11-01", bytes: 1000)
+
+        let days = store.dailySummaries(from: date("2026-10-31 12:00"), to: date("2026-11-02 12:00"), policy: policy)
+        #expect(days.map(\.day) == ["2026-10-31", "2026-11-01", "2026-11-02"])
+        #expect(days[0].bytes == ByteCounts(rx: 100, tx: 1))
+        #expect(days[1].bytes == ByteCounts(rx: 550, tx: 5))
+        #expect(days[1].total == 1555)
+        #expect(days[2].bytes == .zero)
+    }
+
+    @Test func appTotalsAndState() throws {
+        let store = try TrafficStore(path: ":memory:")
+        let now = date("2026-11-01 10:15")
+        try store.addAppHour(at: now, app: "Safari", ByteCounts(rx: 10, tx: 1))
+        try store.addAppHour(at: now.addingTimeInterval(60), app: "Safari", ByteCounts(rx: 10, tx: 1))
+        try store.addAppHour(at: now, app: "Steam", ByteCounts(rx: 500, tx: 0))
+        try store.setAppPath("Safari", path: "/Applications/Safari.app")
+        let apps = store.appTotals(from: date("2026-11-01 00:00"), to: date("2026-11-02 00:00"))
+        #expect(apps.map(\.name) == ["Steam", "Safari"])
+        #expect(apps[1].bytes == ByteCounts(rx: 20, tx: 2))
+        #expect(apps[1].path == "/Applications/Safari.app")
+
+        try store.setState("k", "v")
+        #expect(store.state("k") == "v")
+        try store.setPeak(day: "2026-11-01", DayPeak(rxRate: 5, rxAt: now, txRate: 1, txAt: nil))
+        #expect(store.peak(day: "2026-11-01")?.rxRate == 5)
+        #expect(store.peak(day: "2026-11-01")?.txAt == nil)
+    }
+}
+
+@Suite struct FormatTests {
+    @Test func bytes() {
+        #expect(ByteFormat.bytes(3_210_000_000.0) == "3.21 GB")
+        #expect(ByteFormat.bytes(12_000_000_000.0) == "12.0 GB")
+        #expect(ByteFormat.bytes(512.0) == "512 B")
+        #expect(ByteFormat.compactGB(3_210_000_000) == "3.2")
+        #expect(ByteFormat.compactRate(1_240_000) == "1.2M")
+    }
+}
+
+@Suite struct ServiceComponentTests {
+    @Test func onlyXPCAndExtensionsUseResponsibleApp() {
+        #expect(AppResolver.isServiceComponent(
+            "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"))
+        #expect(!AppResolver.isServiceComponent("/usr/bin/curl"))
+        #expect(!AppResolver.isServiceComponent("/opt/homebrew/bin/git"))
+    }
+}
+
+@Suite struct PersistenceTests {
+    private func tempDir() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("NetQuotaTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    @Test func migratesOldDatabaseAndMarksUnknownCoverage() throws {
+        let dir = try tempDir()
+        let path = dir.appendingPathComponent("old.sqlite").path
+        // 模擬 v0 的資料庫
+        let old = try SQLiteDB(path: path)
+        try old.exec("CREATE TABLE minute_total (ts INTEGER PRIMARY KEY, rx INTEGER NOT NULL, tx INTEGER NOT NULL);")
+        try old.run("INSERT INTO minute_total VALUES (600, 10, 1)")
+
+        let store = try TrafficStore(path: path)
+        var observed: [Double] = []
+        store.forEachMinute(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 10_000)) { _, record in
+            observed.append(record.observedSeconds)
+        }
+        #expect(observed == [-1])
+
+        // 再開一次不會重複遷移
+        _ = try TrafficStore(path: path)
+        try store.addMinute(at: Date(timeIntervalSince1970: 610), MinuteRecord(bytes: ByteCounts(rx: 5, tx: 0), observedSeconds: 2))
+        store.forEachMinute(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 10_000)) { _, record in
+            #expect(record.observedSeconds == 2)
+            #expect(record.bytes.rx == 15)
+        }
+    }
+
+    @Test func minuteFeaturesMerge() throws {
+        let store = try TrafficStore(path: ":memory:")
+        let t = Date(timeIntervalSince1970: 1200)
+        try store.addMinute(at: t, MinuteRecord(bytes: ByteCounts(rx: 100, tx: 10), peakRx: 50, peakTx: 5,
+                                                observedSeconds: 40, interface: "en0"))
+        try store.addMinute(at: t.addingTimeInterval(30), MinuteRecord(bytes: ByteCounts(rx: 1, tx: 1), peakRx: 80, peakTx: 1,
+                                                                       observedSeconds: 40))
+        try store.addMinute(at: t, ByteCounts(rx: 3, tx: 0), recovered: true)
+        var records: [MinuteRecord] = []
+        store.forEachMinute(from: t, to: t.addingTimeInterval(60)) { records.append($1) }
+        #expect(records.count == 1)
+        #expect(records[0].bytes == ByteCounts(rx: 104, tx: 11))
+        #expect(records[0].peakRx == 80)
+        #expect(records[0].peakTx == 5)
+        #expect(records[0].observedSeconds == 60)
+        #expect(records[0].recovered)
+        #expect(records[0].interface == "en0")
+    }
+
+    @Test func datasetHasDenseMinuteGrid() throws {
+        let dir = try tempDir()
+        let store = try TrafficStore(path: ":memory:")
+        let policy = QuotaPolicy(quotaBytes: 12e9, resetHour: 0, calendar: taipei)
+        let start = date("2026-11-02 10:00")
+        try store.addMinute(at: start, MinuteRecord(bytes: ByteCounts(rx: 100, tx: 1), observedSeconds: 60, interface: "en0"))
+        try store.addMinute(at: start.addingTimeInterval(180), MinuteRecord(bytes: ByteCounts(rx: 7, tx: 0), observedSeconds: 30))
+        try store.addAppMinute(at: start, app: "Steam, Inc", ByteCounts(rx: 90, tx: 0))
+
+        let result = try DatasetExporter.export(store: store, policy: policy, to: dir, now: start.addingTimeInterval(240))
+        #expect(result.minuteRows == 5)   // 10:00–10:04，中間沒紀錄的分鐘也要有
+        #expect(result.appRows == 1)
+        let lines = try String(contentsOf: dir.appendingPathComponent("minutes.csv"), encoding: .utf8)
+            .split(separator: "\n").map(String.init)
+        #expect(lines.count == 6)
+        #expect(lines[1].hasSuffix(",100,1,0,0,60,0,en0"))
+        #expect(lines[1].contains(",2026-11-02,600,1,"))  // 第 600 分鐘、週一
+        #expect(lines[2].hasSuffix(",0,0,0,0,0,0,"))      // 沒有監測的分鐘
+        let apps = try String(contentsOf: dir.appendingPathComponent("app_minutes.csv"), encoding: .utf8)
+        #expect(apps.contains("\"Steam, Inc\",90,0"))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("SCHEMA.md").path))
+    }
+
+    @Test func backupProducesReadableCopy() throws {
+        let dir = try tempDir()
+        let store = try TrafficStore(path: dir.appendingPathComponent("live.sqlite").path)
+        try store.addMinute(at: Date(timeIntervalSince1970: 600), ByteCounts(rx: 42, tx: 0))
+        let copy = dir.appendingPathComponent("backup.sqlite")
+        try store.backup(to: copy)
+        let restored = try TrafficStore(path: copy.path)
+        #expect(restored.totals(from: Date(timeIntervalSince1970: 0), to: Date(timeIntervalSince1970: 10_000)).rx == 42)
+    }
+}

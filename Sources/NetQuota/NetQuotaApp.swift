@@ -1,0 +1,93 @@
+import AppKit
+import Combine
+import NetQuotaCore
+import SwiftUI
+
+enum DashboardTab: Hashable {
+    case today, history, apps, settings
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    static let shared = AppModel()
+
+    let settings = AppSettings()
+    let store: TrafficStore
+    let collector: TrafficCollector
+    let databaseURL: URL?
+    let backups: BackupManager?
+    @Published var storageError: String?
+    @Published var dashboardTab: DashboardTab = .today
+    /// 由 MenuBarLabel 接收並開啟儀表板視窗（openWindow 只能在 SwiftUI view 裡呼叫）。
+    let dashboardRequests = PassthroughSubject<Void, Never>()
+
+    func showDashboard(_ tab: DashboardTab = .today) {
+        dashboardTab = tab
+        dashboardRequests.send()
+    }
+
+    private init() {
+        var url: URL?
+        var opened: TrafficStore?
+        var failure: String?
+        do {
+            url = try TrafficStore.defaultPath()
+            opened = try TrafficStore(path: url!.path)
+        } catch {
+            failure = "無法開啟資料庫，本次資料不會被保存：\(error)"
+            url = nil
+        }
+        store = opened ?? (try! TrafficStore(path: ":memory:"))
+        databaseURL = url
+        storageError = failure
+        collector = TrafficCollector(store: store, settings: settings)
+        let store = self.store
+        backups = url.map { BackupManager(store: store, databaseURL: $0) }
+        collector.start()
+        backups?.start()
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 用 `swift run` 執行時沒有 Info.plist 的 LSUIElement，這裡確保不出現在 Dock。
+        NSApp.setActivationPolicy(.accessory)
+        // 執行期間從選單列 App 切成一般 App 時，Dock 不會自己讀 Info.plist 的圖示。
+        if let icon = NSImage(named: "AppIcon") {
+            NSApp.applicationIconImage = icon
+        }
+    }
+
+    /// 選單列太滿時圖示可能被瀏海擋住，再次打開 App 就直接顯示儀表板。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainActor.assumeIsolated { AppModel.shared.showDashboard() }
+        return true
+    }
+}
+
+@main
+struct NetQuotaApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @StateObject private var model = AppModel.shared
+
+    var body: some Scene {
+        MenuBarExtra {
+            PopoverView()
+                .environmentObject(model)
+                .environmentObject(model.settings)
+                .environmentObject(model.collector)
+        } label: {
+            MenuBarLabel(collector: model.collector, settings: model.settings, dashboardRequests: model.dashboardRequests)
+        }
+        .menuBarExtraStyle(.window)
+
+        Window("NetQuota", id: "dashboard") {
+            DashboardView()
+                .environmentObject(model)
+                .environmentObject(model.settings)
+                .environmentObject(model.collector)
+        }
+        .defaultSize(width: 860, height: 640)
+        .defaultLaunchBehavior(.suppressed)
+    }
+}
