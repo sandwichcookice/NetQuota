@@ -7,14 +7,14 @@ struct TodayView: View {
     @EnvironmentObject private var collector: TrafficCollector
     @Environment(\.theme) private var theme
 
-    private struct CumulativePoint: Identifiable {
+    fileprivate struct CumulativePoint: Identifiable, Equatable {
         let date: Date
         let value: Double
         let series: String
         var id: String { "\(series)-\(date.timeIntervalSince1970)" }
     }
 
-    private struct BarPoint: Identifiable {
+    fileprivate struct BarPoint: Identifiable, Equatable {
         let date: Date
         let end: Date
         /// MB
@@ -83,8 +83,17 @@ struct TodayView: View {
                 if let note = collector.recoveredNote {
                     Label(note, systemImage: "info.circle").font(.caption).foregroundStyle(theme.secondary)
                 }
-                section("累積用量（虛線為依目前速度的預測）") { cumulativeChart(scope).frame(height: 220).glow().panel() }
-                section("每 \(Self.barMinutes) 分鐘用量") { barChart.frame(height: 170).panel() }
+                // 圖表只在重新查詢後才變，抽成 Equatable 的子畫面，每 2 秒的即時數字更新時不必重畫。
+                section("累積用量（虛線為依目前速度的預測）") {
+                    CumulativeChart(points: cumulative, quota: scope.quota, domain: collector.dayStart...collector.dayEnd)
+                        .equatable()
+                        .frame(height: 220).glow().panel()
+                }
+                section("每 \(Self.barMinutes) 分鐘用量") {
+                    BarChart(bars: bars, minutes: Self.barMinutes, domain: collector.dayStart...collector.dayEnd)
+                        .equatable()
+                        .frame(height: 170).panel()
+                }
             }
             .padding(20)
         }
@@ -202,62 +211,6 @@ struct TodayView: View {
         }
     }
 
-    private func cumulativeChart(_ scope: Scope) -> some View {
-        Chart {
-            ForEach(cumulative) { point in
-                LineMark(x: .value("時間", point.date), y: .value("用量", point.value / settings.bytesPerGB),
-                         series: .value("系列", point.series))
-                    .foregroundStyle(point.series == "實際" ? theme.accent : theme.warn)
-                    .lineStyle(point.series == "實際" ? StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
-                        : StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                    // 單調插值：曲線圓滑但不會往回彎（累積量不會減少）。
-                    .interpolationMethod(.monotone)
-            }
-            if let quota = scope.quota {
-                RuleMark(y: .value("上限", quota / settings.bytesPerGB))
-                    .foregroundStyle(theme.bad.opacity(0.7))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .annotation(position: .top, alignment: .leading) {
-                        Text("上限 \(settings.format(quota))").font(.caption2).foregroundStyle(theme.bad)
-                    }
-            }
-        }
-        .chartXScale(domain: collector.dayStart...collector.dayEnd)
-        // 刻度上限取上限、預測與實際值中最大的，留一點空間，曲線不會擠在底部。
-        .chartYScale(domain: 0...max(0.5, max(scope.quota ?? 0, scope.forecast?.projectedTotal ?? 0, scope.used)
-            * 1.1 / settings.bytesPerGB))
-        .chartYAxisLabel(settings.binaryUnits ? "GiB" : "GB")
-        .accessibilityLabel("今日累積用量")
-        .accessibilityValue(scope.forecast.map { "目前 \(settings.format(scope.used))，預估今天 \(settings.format($0.projectedTotal))" }
-            ?? "目前 \(settings.format(scope.used))")
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 3)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
-    }
-
-    private var barChart: some View {
-        Chart(bars) { bar in
-            // 下載在下、上傳疊在上面。
-            RectangleMark(xStart: .value("開始", bar.date), xEnd: .value("結束", bar.end),
-                    yStart: .value("用量", bar.low), yEnd: .value("用量", bar.high))
-                .foregroundStyle(by: .value("方向", bar.direction))
-        }
-        .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload])
-        .chartXScale(domain: collector.dayStart...collector.dayEnd)
-        .chartYAxisLabel("MB")
-        .accessibilityLabel("每 \(Self.barMinutes) 分鐘用量")
-        .accessibilityValue("今天共 \(bars.count / 2) 個時段有用量")
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 3)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
-    }
-
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionTitle(title)
@@ -345,6 +298,87 @@ struct TodayView: View {
             let total = Double(bytes.total) / 1_000_000
             return [BarPoint(date: start, end: end, low: 0, high: rx, direction: "下載"),
                     BarPoint(date: start, end: end, low: rx, high: total, direction: "上傳")]
+        }
+    }
+}
+
+/// 今日累積用量曲線：實際值與預測虛線，加上上限線。
+private struct CumulativeChart: View, Equatable {
+    @EnvironmentObject private var settings: AppSettings
+    @Environment(\.theme) private var theme
+    let points: [TodayView.CumulativePoint]
+    let quota: Double?
+    let domain: ClosedRange<Date>
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.points == rhs.points && lhs.quota == rhs.quota && lhs.domain == rhs.domain
+    }
+
+    var body: some View {
+        let used = points.last { $0.series == "實際" }?.value ?? 0
+        let projected = points.last { $0.series == "預測" }?.value
+        Chart {
+            ForEach(points) { point in
+                LineMark(x: .value("時間", point.date), y: .value("用量", point.value / settings.bytesPerGB),
+                         series: .value("系列", point.series))
+                    .foregroundStyle(point.series == "實際" ? theme.accent : theme.warn)
+                    .lineStyle(point.series == "實際" ? StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                        : StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    // 單調插值：曲線圓滑但不會往回彎（累積量不會減少）。
+                    .interpolationMethod(.monotone)
+            }
+            if let quota {
+                RuleMark(y: .value("上限", quota / settings.bytesPerGB))
+                    .foregroundStyle(theme.bad.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(position: .top, alignment: .leading) {
+                        Text("上限 \(settings.format(quota))").font(.caption2).foregroundStyle(theme.bad)
+                    }
+            }
+        }
+        .chartXScale(domain: domain)
+        // 刻度上限取上限、預測與實際值中最大的，留一點空間，曲線不會擠在底部。
+        .chartYScale(domain: 0...max(0.5, max(quota ?? 0, projected ?? 0, used) * 1.1 / settings.bytesPerGB))
+        .chartYAxisLabel(settings.binaryUnits ? "GiB" : "GB")
+        .accessibilityLabel("今日累積用量")
+        .accessibilityValue(projected.map { "目前 \(settings.format(used))，預估今天 \(settings.format($0))" }
+            ?? "目前 \(settings.format(used))")
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .hour, count: 3)) { _ in
+                AxisGridLine()
+                AxisValueLabel(format: .dateTime.hour())
+            }
+        }
+    }
+}
+
+/// 每段時間的用量長條：下載在下、上傳疊在上面。
+private struct BarChart: View, Equatable {
+    @Environment(\.theme) private var theme
+    let bars: [TodayView.BarPoint]
+    let minutes: Int
+    let domain: ClosedRange<Date>
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bars == rhs.bars && lhs.minutes == rhs.minutes && lhs.domain == rhs.domain
+    }
+
+    var body: some View {
+        Chart(bars) { bar in
+            RectangleMark(xStart: .value("開始", bar.date), xEnd: .value("結束", bar.end),
+                    yStart: .value("用量", bar.low), yEnd: .value("用量", bar.high))
+                .foregroundStyle(by: .value("方向", bar.direction))
+        }
+        .chartForegroundStyleScale(["下載": theme.download, "上傳": theme.upload])
+        .chartXScale(domain: domain)
+        .chartYAxisLabel("MB")
+        .accessibilityLabel("每 \(minutes) 分鐘用量")
+        .accessibilityValue("今天共 \(bars.count / 2) 個時段有用量")
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .hour, count: 3)) { _ in
+                AxisGridLine()
+                AxisValueLabel(format: .dateTime.hour())
+            }
         }
     }
 }

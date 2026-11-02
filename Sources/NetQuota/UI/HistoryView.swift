@@ -25,7 +25,7 @@ struct HistoryView: View {
         var id: String { rawValue }
     }
 
-    struct Row: Identifiable {
+    struct Row: Identifiable, Equatable {
         let id: String
         var label: String
         let start: Date
@@ -36,14 +36,6 @@ struct HistoryView: View {
         var peakTx: Double
         var days: Int
         var total: Double { max(0, rx + tx + calibration) }
-    }
-
-    private struct Segment: Identifiable {
-        let row: Row
-        let kind: String
-        let low: Double
-        let high: Double
-        var id: String { "\(row.id)-\(kind)" }
     }
 
     /// 空字串 = 全部網路，其他為網路 id。
@@ -75,8 +67,8 @@ struct HistoryView: View {
                 ExportMenu()
             }
             summary
-            chart.frame(height: 220).panel()
-            table.panel()
+            // 圖表與表格只在重新查詢後才變；抽成 Equatable 的子畫面，每 2 秒的即時更新不必重畫。
+            HistoryDetail(rows: rows, grouping: grouping, quota: quota).equatable()
         }
         .padding(20)
         .task(id: "\(span.rawValue)-\(grouping.rawValue)-\(network)-\(collector.dataVersion)") { reload() }
@@ -91,10 +83,6 @@ struct HistoryView: View {
     /// 選定網路的每日上限；全部網路或沒設定時為 nil。
     private var quota: Double? {
         collector.effectiveQuota(collector.networks.first { $0.id == network })
-    }
-
-    private func isOver(_ row: Row) -> Bool {
-        grouping == .day && row.total > (quota ?? .infinity)
     }
 
     private var summary: some View {
@@ -114,6 +102,101 @@ struct HistoryView: View {
                 StatTile(title: "有資料的天數", value: "\(active.count) 天", detail: "共 \(days.count) 天")
             }
         }
+    }
+
+    @State private var dailyRowsForStats: [Row] = []
+
+    private func reload() {
+        let policy = settings.policy
+        let now = Date()
+        // 從第一筆紀錄開始，不列出安裝前的空白日子。
+        let earliest = policy.dayStart(containing: collector.store.firstRecord() ?? now)
+        let from = max(earliest, policy.dayStart(containing: now.addingTimeInterval(-Double(span.rawValue - 1) * 86_400)))
+        let filter = network.isEmpty ? nil : network
+        var summaries = collector.store.dailySummaries(from: from, to: now, policy: policy, network: filter)
+        // 今天用即時數字（包含還沒寫進資料庫的部分）。
+        if let index = summaries.firstIndex(where: { $0.day == collector.dayKey }) {
+            summaries[index].bytes = filter.map { collector.todayByNetwork[$0] ?? .zero } ?? collector.today
+            summaries[index].calibration = filter.map { collector.calibrations[$0] ?? 0 }
+                ?? collector.calibrations.values.reduce(0, +)
+            summaries[index].peak = collector.peak
+        }
+
+        let daily = summaries.map { summary in
+            Row(id: summary.day, label: shortDayLabel(summary.day), start: summary.start,
+                rx: Double(summary.bytes.rx), tx: Double(summary.bytes.tx), calibration: summary.calibration,
+                peakRx: summary.peak?.rxRate ?? 0, peakTx: summary.peak?.txRate ?? 0, days: 1)
+        }
+        dailyRowsForStats = daily
+
+        switch grouping {
+        case .day:
+            rows = daily
+        case .week, .month:
+            let calendar = Calendar.current
+            var grouped: [Row] = []
+            for row in daily {
+                let key: String
+                let label: String
+                if grouping == .week {
+                    let parts = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: row.start)
+                    key = "\(parts.yearForWeekOfYear ?? 0)-W\(parts.weekOfYear ?? 0)"
+                    let weekStart = calendar.dateInterval(of: .weekOfYear, for: row.start)?.start ?? row.start
+                    label = "\(weekStart.shortDate) 起"
+                } else {
+                    let parts = calendar.dateComponents([.year, .month], from: row.start)
+                    key = String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
+                    label = key
+                }
+                if let last = grouped.last, last.id == key {
+                    grouped[grouped.count - 1].rx += row.rx
+                    grouped[grouped.count - 1].tx += row.tx
+                    grouped[grouped.count - 1].calibration += row.calibration
+                    grouped[grouped.count - 1].peakRx = max(last.peakRx, row.peakRx)
+                    grouped[grouped.count - 1].peakTx = max(last.peakTx, row.peakTx)
+                    grouped[grouped.count - 1].days += 1
+                } else {
+                    grouped.append(Row(id: key, label: label, start: row.start, rx: row.rx, tx: row.tx,
+                                       calibration: row.calibration, peakRx: row.peakRx, peakTx: row.peakTx, days: 1))
+                }
+            }
+            rows = grouped
+        }
+    }
+}
+
+/// 歷史頁的長條圖與表格。
+private struct HistoryDetail: View, Equatable {
+    typealias Row = HistoryView.Row
+    typealias Grouping = HistoryView.Grouping
+
+    @EnvironmentObject private var settings: AppSettings
+    @Environment(\.theme) private var theme
+    let rows: [Row]
+    let grouping: Grouping
+    let quota: Double?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rows == rhs.rows && lhs.grouping == rhs.grouping && lhs.quota == rhs.quota
+    }
+
+    private struct Segment: Identifiable {
+        let row: Row
+        let kind: String
+        let low: Double
+        let high: Double
+        var id: String { "\(row.id)-\(kind)" }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            chart.frame(height: 220).panel()
+            table.panel()
+        }
+    }
+
+    private func isOver(_ row: Row) -> Bool {
+        grouping == .day && row.total > (quota ?? .infinity)
     }
 
     private var chart: some View {
@@ -190,65 +273,5 @@ struct HistoryView: View {
             PlainColumn("下載峰值", width: 100, alignment: .trailing) { Text(settings.formatRate($0.peakRx)) },
             PlainColumn("上傳峰值", width: 100, alignment: .trailing) { Text(settings.formatRate($0.peakTx)) },
         ])
-    }
-
-    @State private var dailyRowsForStats: [Row] = []
-
-    private func reload() {
-        let policy = settings.policy
-        let now = Date()
-        // 從第一筆紀錄開始，不列出安裝前的空白日子。
-        let earliest = policy.dayStart(containing: collector.store.firstRecord() ?? now)
-        let from = max(earliest, policy.dayStart(containing: now.addingTimeInterval(-Double(span.rawValue - 1) * 86_400)))
-        let filter = network.isEmpty ? nil : network
-        var summaries = collector.store.dailySummaries(from: from, to: now, policy: policy, network: filter)
-        // 今天用即時數字（包含還沒寫進資料庫的部分）。
-        if let index = summaries.firstIndex(where: { $0.day == collector.dayKey }) {
-            summaries[index].bytes = filter.map { collector.todayByNetwork[$0] ?? .zero } ?? collector.today
-            summaries[index].calibration = filter.map { collector.calibrations[$0] ?? 0 }
-                ?? collector.calibrations.values.reduce(0, +)
-            summaries[index].peak = collector.peak
-        }
-
-        let daily = summaries.map { summary in
-            Row(id: summary.day, label: shortDayLabel(summary.day), start: summary.start,
-                rx: Double(summary.bytes.rx), tx: Double(summary.bytes.tx), calibration: summary.calibration,
-                peakRx: summary.peak?.rxRate ?? 0, peakTx: summary.peak?.txRate ?? 0, days: 1)
-        }
-        dailyRowsForStats = daily
-
-        switch grouping {
-        case .day:
-            rows = daily
-        case .week, .month:
-            let calendar = Calendar.current
-            var grouped: [Row] = []
-            for row in daily {
-                let key: String
-                let label: String
-                if grouping == .week {
-                    let parts = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: row.start)
-                    key = "\(parts.yearForWeekOfYear ?? 0)-W\(parts.weekOfYear ?? 0)"
-                    let weekStart = calendar.dateInterval(of: .weekOfYear, for: row.start)?.start ?? row.start
-                    label = "\(weekStart.shortDate) 起"
-                } else {
-                    let parts = calendar.dateComponents([.year, .month], from: row.start)
-                    key = String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
-                    label = key
-                }
-                if let last = grouped.last, last.id == key {
-                    grouped[grouped.count - 1].rx += row.rx
-                    grouped[grouped.count - 1].tx += row.tx
-                    grouped[grouped.count - 1].calibration += row.calibration
-                    grouped[grouped.count - 1].peakRx = max(last.peakRx, row.peakRx)
-                    grouped[grouped.count - 1].peakTx = max(last.peakTx, row.peakTx)
-                    grouped[grouped.count - 1].days += 1
-                } else {
-                    grouped.append(Row(id: key, label: label, start: row.start, rx: row.rx, tx: row.tx,
-                                       calibration: row.calibration, peakRx: row.peakRx, peakTx: row.peakTx, days: 1))
-                }
-            }
-            rows = grouped
-        }
     }
 }

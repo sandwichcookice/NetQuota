@@ -64,7 +64,7 @@ App 的版本號會自動取自最近的 git tag（例如 `v1.1` → 1.1），�
 | 資料 | 來源 |
 |---|---|
 | 總用量 | `sysctl NET_RT_IFLIST2` 的 64-bit 介面計數器，只算實體介面 `en*`（排除 loopback、VPN `utun`、AirDrop `awdl` 等，避免重複計算） |
-| 各程式用量 | 長駐 `nettop -P -d -t external`（透過 `script` 提供 pty，避免輸出被緩衝）。XPC 服務（例如 WebKit Networking）歸到負責的 App，Chrome Helper 等歸到外層 .app |
+| 各程式用量 | 訂閱系統的 NetworkStatistics 框架（nettop、活動監視器底層用的，不需要權限），核心每 2 秒推送每條 TCP／UDP 連線的計數，連線關閉前也會送最後一次，幾乎不耗 CPU。核心只把使用者空間的 QUIC 連線（Safari、nsurlsessiond 的 HTTP/3）給有 Apple 私有 entitlement 的程序，所以另外每 10 秒跑一次 `nettop -L 1` 快照只補 `quic` 連線（這類連線很長壽，漏得少）。框架載入失敗時退回每 2 秒 nettop 快照。不用常駐的 nettop：它會持續吃掉 1 個以上的 CPU 核心，很耗電又讓畫面卡頓。XPC 服務（例如 WebKit Networking）歸到負責的 App，Chrome Helper 等歸到外層 .app |
 | App 關閉期間 | 每分鐘記錄計數器快照；重新啟動時補回差額，依時間比例分配到各天（這段期間無法區分程式） |
 
 - 每日額度以**介面總量**為準；各程式加總與總量可能略有差異。
@@ -82,7 +82,7 @@ App 的版本號會自動取自最近的 git tag（例如 `v1.1` → 1.1），�
 | `minute_total` | 每分鐘：下載／上傳位元組、分鐘內峰值速率、實際監測秒數 `observed_sec`、是否為補算 `recovered`、主要介面 `iface` |
 | `minute_app` | 每分鐘、每個程式的下載／上傳 |
 | `sample_total` | 每次取樣的原始資料（約每 2 秒）：時間（毫秒）、實際間隔、下載／上傳、是否跨睡眠、網路、各介面增量 |
-| `sample_app` | 每個 nettop 區塊（約每 3 秒）裡有流量的程序：時間、程式、pid、下載／上傳、網路 |
+| `sample_app` | 每次取樣（約每 2 秒）裡有流量的程序：時間、程式、pid、下載／上傳、網路 |
 | `minute_network` | 每分鐘、每個網路的下載／上傳（同一分鐘換網路會分開） |
 | `networks` | 網路清單：路由器位址、Wi-Fi 名稱、自訂名稱、每日上限 |
 | `hour_app` | 每小時、每個程式（給介面查詢用） |

@@ -180,23 +180,77 @@ private func date(_ text: String) -> Date {
         #expect(NettopParser.parseLine(",bytes_in,bytes_out,") == nil)
     }
 
-    @Test func dropsFirstCumulativeBlockAndSplitsChunks() {
+    @Test func firstSnapshotIsBaseline() {
         var parser = NettopParser()
-        // pty 輸出：\r\n 換行、開頭有 ^D^H^H 控制字元，資料可能從任意位置被切開。
-        let stream = "\u{4}\u{8}\u{8},bytes_in,bytes_out,\r\napsd.370,292890,61828,\r\n"
-            + ",bytes_in,bytes_out,\r\nPython.37936,5013505,447,\r\nidle.1,0,0,\r\n"
-            + ",bytes_in,bytes_out,\r\nPython.37936,0,0,\r\n"
-            + ",bytes_in,bytes_out,\r\n"
-        var blocks: [[ProcessSample]] = []
-        var index = stream.startIndex
-        while index < stream.endIndex {
-            let end = stream.index(index, offsetBy: 7, limitedBy: stream.endIndex) ?? stream.endIndex
-            blocks += parser.feed(String(stream[index..<end]))
-            index = end
-        }
-        #expect(blocks.count == 2)
-        #expect(blocks[0] == [ProcessSample(name: "Python", pid: 37936, bytes: ByteCounts(rx: 5013505, tx: 447))])
-        #expect(blocks[1].isEmpty)
+        #expect(parser.snapshot(",bytes_in,bytes_out,\napsd.370,100,50,\ntcp4 1.1.1.1:1<->2.2.2.2:443,100,50,\n") == nil)
+    }
+
+    @Test func diffsPerFlowSoClosedConnectionsDoNotGoNegative() {
+        var parser = NettopParser()
+        let first = """
+            ,bytes_in,bytes_out,
+            Google Chrome H.36470,1000,100,
+            tcp4 10.0.0.2:5000<->1.1.1.1:443,600,60,
+            quic4 10.0.0.2:5001<->1.1.1.2:443,400,40,
+            mDNSResponder.425,,,
+            udp4 *:5353<->*:*,,,
+            """
+        // 第一條連線多了 100/10，第二條關閉了（程序合計變小），新開一條 300/30；監聽中的 socket 沒有數字。
+        let second = """
+            ,bytes_in,bytes_out,
+            Google Chrome H.36470,1000,100,
+            tcp4 10.0.0.2:5000<->1.1.1.1:443,700,70,
+            tcp4 10.0.0.2:5002<->1.1.1.3:443,300,30,
+            mDNSResponder.425,,,
+            udp4 *:5353<->*:*,,,
+            Python.900,0,0,
+            tcp4 10.0.0.2:6000<->1.1.1.4:443,0,0,
+            """
+        _ = parser.snapshot(first)
+        #expect(parser.snapshot(second) == [ProcessSample(name: "Google Chrome H", pid: 36470,
+                                                          bytes: ByteCounts(rx: 400, tx: 40))])
+        // 沒有變化時沒有增量。
+        #expect(parser.snapshot(second) == [])
+    }
+
+    @Test func flowPrefixKeepsOnlyMatchingFlows() {
+        var parser = NettopParser(flowPrefix: "quic")
+        let first = "nsurlsessiond.642,100,100,\nquic4 a:1<->b:443,60,60,\ntcp4 a:2<->b:443,40,40,\n"
+        let second = "nsurlsessiond.642,130,130,\nquic4 a:1<->b:443,70,70,\ntcp4 a:2<->b:443,60,60,\n"
+        _ = parser.snapshot(first)
+        #expect(parser.snapshot(second) == [ProcessSample(name: "nsurlsessiond", pid: 642, bytes: ByteCounts(rx: 10, tx: 10))])
+    }
+
+    @Test func reusedFlowWithSmallerCounterCountsAsNew() {
+        var parser = NettopParser()
+        _ = parser.snapshot("curl.1,500,5,\ntcp4 a:1<->b:2,500,5,\n")
+        #expect(parser.snapshot("curl.1,20,2,\ntcp4 a:1<->b:2,20,2,\n")
+            == [ProcessSample(name: "curl", pid: 1, bytes: ByteCounts(rx: 20, tx: 2))])
+    }
+}
+
+@Suite struct NetworkStatisticsTests {
+    @Test func frameworkLoads() {
+        #expect(NetworkStatisticsSampler.isAvailable)
+    }
+
+    /// 訂閱後應該馬上看到系統既有的連線（mDNSResponder 等一定有）。
+    @Test func reportsSources() async throws {
+        let sampler = try #require(NetworkStatisticsSampler(interval: 1))
+        sampler.start()
+        try await Task.sleep(for: .seconds(2))
+        #expect(sampler.hasSources)
+        sampler.stop()
+        #expect(!sampler.hasSources)
+    }
+
+    @Test func monitorPrefersFramework() async throws {
+        let monitor = ProcessMonitor(interval: 1)
+        monitor.start()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(monitor.backend == .networkStatistics)
+        monitor.stop()
+        #expect(monitor.backend == nil)
     }
 }
 
