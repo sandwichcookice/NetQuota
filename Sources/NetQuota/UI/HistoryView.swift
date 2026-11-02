@@ -90,7 +90,7 @@ struct HistoryView: View {
 
     /// 選定網路的每日上限；全部網路或沒設定時為 nil。
     private var quota: Double? {
-        collector.networks.first { $0.id == network }?.quotaBytes
+        collector.effectiveQuota(collector.networks.first { $0.id == network })
     }
 
     private func isOver(_ row: Row) -> Bool {
@@ -107,8 +107,12 @@ struct HistoryView: View {
             StatTile(title: "區間合計", value: settings.format(days.reduce(0) { $0 + $1.total }))
             StatTile(title: "平均每日（有資料的日子）", value: settings.format(average))
             StatTile(title: "最高的一天", value: maxDay.map { settings.format($0.total) } ?? "—", detail: maxDay?.label)
-            StatTile(title: "超過上限的天數", value: quota == nil ? "—" : "\(over) 天",
-                     detail: quota == nil ? "選擇有設定上限的網路" : nil, tint: quota == nil ? nil : (over > 0 ? theme.bad : theme.good))
+            if settings.isQuotaMode {
+                StatTile(title: "超過上限的天數", value: quota == nil ? "—" : "\(over) 天",
+                         detail: quota == nil ? "選擇有設定上限的網路" : nil, tint: quota == nil ? nil : (over > 0 ? theme.bad : theme.good))
+            } else {
+                StatTile(title: "有資料的天數", value: "\(active.count) 天", detail: "共 \(days.count) 天")
+            }
         }
     }
 

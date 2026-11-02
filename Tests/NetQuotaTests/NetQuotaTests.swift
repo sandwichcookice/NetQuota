@@ -76,6 +76,16 @@ private func date(_ text: String) -> Date {
         #expect(forecast.exceedAt == date("2026-11-01 15:20"))
     }
 
+    @Test func monitorModeProjectsWithoutQuota() {
+        // 流量監測模式沒有上限，用 .infinity 只推估今天的總用量。
+        let now = date("2026-11-01 12:00")
+        let end = date("2026-11-02 00:00")
+        let forecast = Forecast.make(used: 6e9, quota: .infinity, recentBytes: 0.5e6 * 1800, window: 1800,
+                                     now: now, dayEnd: end)!
+        #expect(abs(forecast.projectedTotal - 27.6e9) < 1)
+        #expect(forecast.exceedAt == nil)
+    }
+
     @Test func historyProfileAvoidsNightOverProjection() {
         // 凌晨 1 點最近很忙（每秒 0.5MB），但過去這個時段之後幾乎不用網路。
         var hourly = [Double](repeating: 0, count: 24)

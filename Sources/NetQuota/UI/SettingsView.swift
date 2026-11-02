@@ -14,6 +14,15 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("模式") {
+                Picker("模式", selection: $settings.usageMode) {
+                    ForEach(UsageMode.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 260)
+                Text(settings.usageMode.subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("外觀") {
                 Picker("風格", selection: $settings.theme) {
                     ForEach(AppTheme.allCases) { Text($0.title).tag($0) }
@@ -30,8 +39,10 @@ struct SettingsView: View {
                 }
             }
 
-            Section("網路與每日上限") {
-                Text("每個網路分開計算，可以各自設定每日上限（例如宿舍 12GB、另一個網路 16GB）。沒有設定上限的網路只記錄、不提醒。")
+            Section(settings.isQuotaMode ? "網路與每日上限" : "網路") {
+                Text(settings.isQuotaMode
+                     ? "每個網路分開計算，可以各自設定每日上限（例如宿舍 12GB、另一個網路 16GB）。沒有設定上限的網路只記錄、不提醒。"
+                     : "每個網路分開計算用量。需要每日上限時，把上方的模式切到「每日額度」。")
                     .font(.caption).foregroundStyle(.secondary)
                 LocationPermissionRow(wifi: collector.wifi)
                 if collector.networks.isEmpty {
@@ -53,9 +64,11 @@ struct SettingsView: View {
             }
 
             Section("通知") {
-                Toggle("有設定上限的網路用量達 70% / 90% / 100% 時通知", isOn: $settings.alertsEnabled)
-                Toggle("預測今天會超過上限時通知（目前網路、已用 30% 以上才提醒）", isOn: $settings.forecastAlertEnabled)
-                    .disabled(!settings.alertsEnabled)
+                if settings.isQuotaMode {
+                    Toggle("有設定上限的網路用量達 70% / 90% / 100% 時通知", isOn: $settings.alertsEnabled)
+                    Toggle("預測今天會超過上限時通知（目前網路、已用 30% 以上才提醒）", isOn: $settings.forecastAlertEnabled)
+                        .disabled(!settings.alertsEnabled)
+                }
                 Toggle("單一程式短時間大量使用時通知", isOn: $settings.appSpikeEnabled)
                 HStack {
                     Stepper("\(settings.appSpikeMinutes) 分鐘內", value: $settings.appSpikeMinutes, in: 1...60)
@@ -74,11 +87,14 @@ struct SettingsView: View {
                     Text("NetQuota 仍會在背景記錄、照常通知。要看儀表板時，用 Spotlight 搜尋「NetQuota」打開。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Picker("顯示", selection: $settings.menuBarStyle) {
-                    ForEach(MenuBarStyle.allCases) { Text($0.title).tag($0) }
+                // 流量監測模式的選單列固定顯示今日用量。
+                if settings.isQuotaMode {
+                    Picker("顯示", selection: $settings.menuBarStyle) {
+                        ForEach(MenuBarStyle.allCases) { Text($0.title).tag($0) }
+                    }
+                    .frame(maxWidth: 360)
+                    .disabled(!settings.showMenuBarItem)
                 }
-                .frame(maxWidth: 360)
-                .disabled(!settings.showMenuBarItem)
                 Toggle("同時顯示即時速率", isOn: $settings.showSpeedInMenuBar)
                     .disabled(!settings.showMenuBarItem)
                 HStack {
@@ -299,21 +315,26 @@ private struct NetworkSettingsRow: View {
             Text(details).font(.caption).foregroundStyle(.secondary)
 
             HStack {
-                Toggle("每日上限", isOn: $limited)
-                    .onChange(of: limited) { _, on in
-                        if on, limitGB == nil { limitGB = 12 }
-                        collector.setQuota(network: network.id, gb: on ? limitGB : nil)
-                    }
-                TextField(unit, value: $limitGB, format: .number.precision(.fractionLength(0...2)), prompt: Text("12"))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 80)
-                    .labelsHidden()
-                    .disabled(!limited)
-                    .onSubmit { if limited { collector.setQuota(network: network.id, gb: limitGB) } }
-                Text(unit).foregroundStyle(.secondary)
-                Button("儲存") {
+                // 流量監測模式不顯示上限，但保留設定值，切回每日額度模式就恢復。
+                if settings.isQuotaMode {
+                    Toggle("每日上限", isOn: $limited)
+                        .onChange(of: limited) { _, on in
+                            if on, limitGB == nil { limitGB = 12 }
+                            collector.setQuota(network: network.id, gb: on ? limitGB : nil)
+                        }
+                    TextField(unit, value: $limitGB, format: .number.precision(.fractionLength(0...2)), prompt: Text("12"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .labelsHidden()
+                        .disabled(!limited)
+                        .onSubmit { if limited { collector.setQuota(network: network.id, gb: limitGB) } }
+                    Text(unit).foregroundStyle(.secondary)
+                }
+                Button(settings.isQuotaMode ? "儲存" : "儲存名稱") {
                     collector.setLabel(network: network.id, name)
-                    collector.setQuota(network: network.id, gb: limited ? limitGB : nil)
+                    if settings.isQuotaMode {
+                        collector.setQuota(network: network.id, gb: limited ? limitGB : nil)
+                    }
                 }
             }
 

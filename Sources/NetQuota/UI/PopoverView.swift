@@ -13,14 +13,25 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             HStack(alignment: .center, spacing: 16) {
-                UsageRing(fraction: collector.fraction,
-                          usedText: settings.format(collector.used),
-                          quotaText: collector.quota.map { settings.format($0) })
-                    .frame(width: 118, height: 118)
+                Group {
+                    if settings.isQuotaMode {
+                        UsageRing(fraction: collector.fraction,
+                                  usedText: settings.format(collector.used),
+                                  quotaText: collector.quota.map { settings.format($0) })
+                    } else {
+                        UsageFigure(usedText: settings.format(collector.used))
+                    }
+                }
+                .frame(width: 118, height: 118)
                 VStack(alignment: .leading, spacing: 6) {
                     labeled("arrow.down", theme.download, "下載", settings.format(collector.focusBytes.rx))
                     labeled("arrow.up", theme.upload, "上傳", settings.format(collector.focusBytes.tx))
-                    labeled("gauge.with.needle", theme.secondary, "剩餘", collector.remaining.map { settings.format($0) } ?? "不限制")
+                    if settings.isQuotaMode {
+                        labeled("gauge.with.needle", theme.secondary, "剩餘", collector.remaining.map { settings.format($0) } ?? "不限制")
+                    } else {
+                        labeled("chart.line.uptrend.xyaxis", theme.secondary, "預估今日",
+                                collector.forecast.map { settings.format($0.projectedTotal) } ?? "收集中")
+                    }
                     if collector.calibration != 0 {
                         Text("含手動校正 \(settings.format(collector.calibration))")
                             .font(.caption2).foregroundStyle(theme.secondary)
@@ -28,7 +39,8 @@ struct PopoverView: View {
                 }
             }
             .themedCard()
-            forecastBox
+            // 流量監測模式的預估已經放在上面那一列。
+            if settings.isQuotaMode { forecastBox }
             networksSection
             speedSection
             divider
