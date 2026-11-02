@@ -13,10 +13,10 @@ struct AppsView: View {
 
     @State private var range: Range = .today
     @State private var apps: [AppUsage] = []
-    /// 預設依合計由大到小；點表頭切換。
-    @State private var sortOrder = [KeyPathComparator(\AppUsage.bytes.total, order: .reverse)]
+    @State private var lastLiveUpdate = Date.distantPast
 
-    private var sortedApps: [AppUsage] { apps.sorted(using: sortOrder) }
+    /// 今日的即時排行最多每幾秒更新一次表格：每次取樣都重建整張表，捲動時會卡。
+    private static let liveUpdateInterval: TimeInterval = 10
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -35,7 +35,7 @@ struct AppsView: View {
                                        description: Text("程式流量會在 App 執行期間持續記錄。"))
             } else {
                 // 比例條直接放在每一列，不再另外畫一張重複的圖表，表格可以顯示更多列。
-                table.panel()
+                AppsTable(apps: apps).equatable().panel()
                 HStack(spacing: 12) {
                     Label("下載", systemImage: "square.fill").foregroundStyle(theme.download)
                     Label("上傳", systemImage: "square.fill").foregroundStyle(theme.upload)
@@ -52,14 +52,55 @@ struct AppsView: View {
         .padding(20)
         .task(id: "\(range.rawValue)-\(collector.dataVersion)") { reload() }
         .onChange(of: collector.apps) { _, live in
-            if range == .today { apps = live }
+            let now = Date()
+            guard range == .today, now.timeIntervalSince(lastLiveUpdate) >= Self.liveUpdateInterval else { return }
+            lastLiveUpdate = now
+            apps = live
         }
     }
 
+    private func reload() {
+        let policy = settings.policy
+        let now = Date()
+        let todayStart = collector.dayStart
+        switch range {
+        case .today:
+            apps = collector.apps
+            lastLiveUpdate = now
+        case .yesterday:
+            let start = policy.dayStart(containing: todayStart.addingTimeInterval(-3600))
+            apps = collector.store.appTotals(from: start, to: todayStart)
+        case .week:
+            apps = collector.store.appTotals(from: todayStart.addingTimeInterval(-6 * 86_400), to: now.addingTimeInterval(3600))
+        case .month:
+            apps = collector.store.appTotals(from: todayStart.addingTimeInterval(-29 * 86_400), to: now.addingTimeInterval(3600))
+        case .all:
+            apps = collector.store.appTotals(from: .distantPast, to: now.addingTimeInterval(3600))
+        }
+    }
+}
+
+/// 程式排行表格。只依 `apps` 比較是否相同，collector 每次取樣讓上層重算時不會重建整張表。
+private struct AppsTable: View, Equatable {
+    @EnvironmentObject private var settings: AppSettings
+    @Environment(\.theme) private var theme
+    let apps: [AppUsage]
+    /// 預設依合計由大到小；點表頭切換。
+    @State private var sortOrder = [KeyPathComparator(\AppUsage.bytes.total, order: .reverse)]
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.apps == rhs.apps }
+
+    private var sortedApps: [AppUsage] { apps.sorted(using: sortOrder) }
+    /// 排序可能不是依合計，比例條以最大的那個為基準。
+    private var maxTotal: UInt64 { max(1, apps.map(\.bytes.total).max() ?? 1) }
+    private var sum: Double { max(1, apps.reduce(0) { $0 + Double($1.bytes.total) }) }
+
+    var body: some View {
+        table
+    }
+
     /// 程式名稱、圖示、比例條；命令列工具加上標籤，和同名的 App 區分。
-    private func nameCell(_ app: AppUsage) -> some View {
-        // 排序可能不是依合計，比例條以最大的那個為基準。
-        let maxTotal = max(1, apps.map(\.bytes.total).max() ?? 1)
+    private func nameCell(_ app: AppUsage, maxTotal: UInt64) -> some View {
         let isCommandLine = !(app.path?.hasSuffix(".app") ?? false)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
@@ -96,9 +137,8 @@ struct AppsView: View {
     }
 
     private var systemTable: some View {
-        let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
-        return Table(sortedApps, sortOrder: $sortOrder) {
-            TableColumn("程式", value: \.name) { app in nameCell(app) }
+        Table(sortedApps, sortOrder: $sortOrder) {
+            TableColumn("程式", value: \.name) { app in nameCell(app, maxTotal: maxTotal) }
             .width(min: 220)
             TableColumn("下載", value: \.bytes.rx) { Text(settings.format($0.bytes.rx)).monospacedDigit() }.alignment(.numeric)
             TableColumn("上傳", value: \.bytes.tx) { Text(settings.format($0.bytes.tx)).monospacedDigit() }.alignment(.numeric)
@@ -113,10 +153,9 @@ struct AppsView: View {
     }
 
     private var plainTable: some View {
-        let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
         let byTotal = KeyPathComparator(\AppUsage.bytes.total, order: .reverse)
         return PlainTable(rows: sortedApps, columns: [
-            PlainColumn("程式", sort: KeyPathComparator(\.name)) { app in nameCell(app) },
+            PlainColumn("程式", sort: KeyPathComparator(\.name)) { app in nameCell(app, maxTotal: maxTotal) },
             PlainColumn("下載", width: 90, alignment: .trailing, sort: KeyPathComparator(\.bytes.rx, order: .reverse)) {
                 Text(settings.format($0.bytes.rx))
             },
@@ -128,24 +167,5 @@ struct AppsView: View {
                 Text(String(format: "%.1f%%", Double(app.bytes.total) / sum * 100))
             },
         ], sortOrder: $sortOrder)
-    }
-
-    private func reload() {
-        let policy = settings.policy
-        let now = Date()
-        let todayStart = collector.dayStart
-        switch range {
-        case .today:
-            apps = collector.apps
-        case .yesterday:
-            let start = policy.dayStart(containing: todayStart.addingTimeInterval(-3600))
-            apps = collector.store.appTotals(from: start, to: todayStart)
-        case .week:
-            apps = collector.store.appTotals(from: todayStart.addingTimeInterval(-6 * 86_400), to: now.addingTimeInterval(3600))
-        case .month:
-            apps = collector.store.appTotals(from: todayStart.addingTimeInterval(-29 * 86_400), to: now.addingTimeInterval(3600))
-        case .all:
-            apps = collector.store.appTotals(from: .distantPast, to: now.addingTimeInterval(3600))
-        }
     }
 }

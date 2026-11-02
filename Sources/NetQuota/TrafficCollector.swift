@@ -24,7 +24,7 @@ struct NetworkUsage: Identifiable {
     var fraction: Double? { quota.map { $0 > 0 ? used / $0 : 0 } }
 }
 
-/// 每 2 秒讀一次介面計數器、接收 nettop 的各程式增量，依目前所在的網路分開累計，每分鐘寫入資料庫。
+/// 每 2 秒讀一次介面計數器、接收 nettop 快照算出的各程式增量，依目前所在的網路分開累計，每分鐘寫入資料庫。
 @MainActor
 final class TrafficCollector: ObservableObject {
     /// 今天所有網路合計。
@@ -52,7 +52,7 @@ final class TrafficCollector: ObservableObject {
     let settings: AppSettings
     let wifi = WiFiNameProvider()
     private let alerts: AlertManager
-    private let monitor = ProcessMonitor(interval: 3)
+    private let monitor = ProcessMonitor()
     private let resolver = AppResolver()
 
     private var lastRaw: [String: ByteCounts] = [:]
@@ -334,6 +334,7 @@ final class TrafficCollector: ObservableObject {
     }
 
     private func ingest(_ samples: [ProcessSample]) {
+        guard !samples.isEmpty else { return }
         let now = Date()
         let minute = Self.minuteStart(now)
         let spikeCutoff = now.addingTimeInterval(-Double(settings.appSpikeMinutes) * 60)
@@ -368,10 +369,12 @@ final class TrafficCollector: ObservableObject {
         publishApps()
     }
 
+    /// 沒有變化就不發布，避免每次取樣都讓所有觀察 collector 的畫面重算。
     private func publishApps() {
-        apps = appTotals
+        let sorted = appTotals
             .map { AppUsage(name: $0.key, path: appPaths[$0.key], bytes: $0.value) }
             .sorted { $0.bytes.total > $1.bytes.total }
+        if sorted != apps { apps = sorted }
     }
 
     /// 只針對目前網路；額度模式下沒有上限的網路不預測，流量監測模式只推估今天的總用量。
