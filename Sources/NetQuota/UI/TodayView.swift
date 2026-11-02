@@ -202,7 +202,10 @@ struct TodayView: View {
                 LineMark(x: .value("時間", point.date), y: .value("用量", point.value / settings.bytesPerGB),
                          series: .value("系列", point.series))
                     .foregroundStyle(point.series == "實際" ? theme.accent : theme.warn)
-                    .lineStyle(point.series == "實際" ? StrokeStyle(lineWidth: 2) : StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    .lineStyle(point.series == "實際" ? StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                        : StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    // 單調插值：曲線圓滑但不會往回彎（累積量不會減少）。
+                    .interpolationMethod(.monotone)
             }
             if let quota = scope.quota {
                 RuleMark(y: .value("上限", quota / settings.bytesPerGB))
@@ -256,6 +259,46 @@ struct TodayView: View {
         }
     }
 
+    /// 平滑累積曲線：以 1 分鐘取樣後做時間移動平均，再每 5 分鐘取一點交給圖表做單調插值。
+    /// 視窗在頭尾對稱縮小，所以起點與最後的即時值完全不變，預測線能無縫接上；
+    /// 視窗兩端只會往後移，遞增的累積量平均後仍然遞增。
+    private static func smoothed(_ raw: [(date: Date, value: Double)],
+                                 halfWindowMinutes: Int = 10, strideMinutes: Int = 5) -> [(date: Date, value: Double)] {
+        guard let start = raw.first?.date, let last = raw.last, raw.count > 2 else { return raw }
+        let count = Int(last.date.timeIntervalSince(start) / 60) + 1
+        guard count > 2 else { return raw }
+
+        // 線性內插到每分鐘一點。
+        var samples = [Double](repeating: 0, count: count)
+        var j = 0
+        for i in 0..<count {
+            let date = start.addingTimeInterval(Double(i) * 60)
+            while j + 1 < raw.count - 1, raw[j + 1].date <= date { j += 1 }
+            let a = raw[j], b = raw[j + 1]
+            let span = b.date.timeIntervalSince(a.date)
+            let t = span > 0 ? min(1, max(0, date.timeIntervalSince(a.date) / span)) : 1
+            samples[i] = a.value + (b.value - a.value) * t
+        }
+
+        var prefix = [Double](repeating: 0, count: count + 1)
+        for i in 0..<count { prefix[i + 1] = prefix[i] + samples[i] }
+        func average(_ i: Int) -> Double {
+            let h = min(halfWindowMinutes, i, count - 1 - i)
+            return (prefix[i + h + 1] - prefix[i - h]) / Double(2 * h + 1)
+        }
+
+        var result = stride(from: 0, to: count, by: strideMinutes).map {
+            (date: start.addingTimeInterval(Double($0) * 60), value: average($0))
+        }
+        // 接近尾端時每分鐘一點，讓縮小中的視窗平順收斂到即時值。
+        for i in max(count - halfWindowMinutes, 1)..<count where i % strideMinutes != 0 {
+            result.append((start.addingTimeInterval(Double(i) * 60), average(i)))
+        }
+        result.sort { $0.date < $1.date }
+        if last.date > result.last!.date { result.append(last) }
+        return result
+    }
+
     private func reload() {
         let now = Date()
         let scope = scope
@@ -264,13 +307,14 @@ struct TodayView: View {
         } ?? collector.store.minuteTotals(from: collector.dayStart, to: collector.dayEnd)
 
         var running = scope.calibration
-        var points = [CumulativePoint(date: collector.dayStart, value: max(0, running), series: "實際")]
+        var raw = [(date: collector.dayStart, value: max(0, running))]
         for row in minutes {
             running += Double(row.bytes.total)
-            points.append(CumulativePoint(date: row.date.addingTimeInterval(60), value: max(0, running), series: "實際"))
+            raw.append((row.date.addingTimeInterval(60), max(0, running)))
         }
         // 最後一點用即時數字，包含尚未寫入資料庫的這一分鐘。
-        points.append(CumulativePoint(date: now, value: scope.used, series: "實際"))
+        raw.append((now, scope.used))
+        var points = Self.smoothed(raw).map { CumulativePoint(date: $0.date, value: $0.value, series: "實際") }
         if let forecast = scope.forecast {
             // 預測曲線從目前的實際值接續（曲線第一點是預測當下的值，可能比畫面上的即時值早幾秒）。
             points.append(CumulativePoint(date: now, value: scope.used, series: "預測"))

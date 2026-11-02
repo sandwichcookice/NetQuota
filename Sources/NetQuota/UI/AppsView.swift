@@ -13,6 +13,10 @@ struct AppsView: View {
 
     @State private var range: Range = .today
     @State private var apps: [AppUsage] = []
+    /// 預設依合計由大到小；點表頭切換。
+    @State private var sortOrder = [KeyPathComparator(\AppUsage.bytes.total, order: .reverse)]
+
+    private var sortedApps: [AppUsage] { apps.sorted(using: sortOrder) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -54,7 +58,8 @@ struct AppsView: View {
 
     /// 程式名稱、圖示、比例條；命令列工具加上標籤，和同名的 App 區分。
     private func nameCell(_ app: AppUsage) -> some View {
-        let maxTotal = max(1, apps.first?.bytes.total ?? 1)
+        // 排序可能不是依合計，比例條以最大的那個為基準。
+        let maxTotal = max(1, apps.map(\.bytes.total).max() ?? 1)
         let isCommandLine = !(app.path?.hasSuffix(".app") ?? false)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
@@ -92,13 +97,15 @@ struct AppsView: View {
 
     private var systemTable: some View {
         let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
-        return Table(apps) {
-            TableColumn("程式") { app in nameCell(app) }
+        return Table(sortedApps, sortOrder: $sortOrder) {
+            TableColumn("程式", value: \.name) { app in nameCell(app) }
             .width(min: 220)
-            TableColumn("下載") { Text(settings.format($0.bytes.rx)).monospacedDigit() }.alignment(.numeric)
-            TableColumn("上傳") { Text(settings.format($0.bytes.tx)).monospacedDigit() }.alignment(.numeric)
-            TableColumn("合計") { Text(settings.format($0.bytes.total)).monospacedDigit() }.alignment(.numeric)
-            TableColumn("佔比") { app in
+            TableColumn("下載", value: \.bytes.rx) { Text(settings.format($0.bytes.rx)).monospacedDigit() }.alignment(.numeric)
+            TableColumn("上傳", value: \.bytes.tx) { Text(settings.format($0.bytes.tx)).monospacedDigit() }.alignment(.numeric)
+            TableColumn("合計", value: \.bytes.total) { Text(settings.format($0.bytes.total)).monospacedDigit() }
+            .alignment(.numeric)
+            // 佔比與合計同序。
+            TableColumn("佔比", value: \.bytes.total) { app in
                 Text(String(format: "%.1f%%", Double(app.bytes.total) / sum * 100)).monospacedDigit()
             }
             .alignment(.numeric)
@@ -107,15 +114,20 @@ struct AppsView: View {
 
     private var plainTable: some View {
         let sum = max(1, apps.reduce(0) { $0 + Double($1.bytes.total) })
-        return PlainTable(rows: apps, columns: [
-            PlainColumn("程式") { app in nameCell(app) },
-            PlainColumn("下載", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.rx)) },
-            PlainColumn("上傳", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.tx)) },
-            PlainColumn("合計", width: 90, alignment: .trailing) { Text(settings.format($0.bytes.total)) },
-            PlainColumn("佔比", width: 60, alignment: .trailing) { app in
+        let byTotal = KeyPathComparator(\AppUsage.bytes.total, order: .reverse)
+        return PlainTable(rows: sortedApps, columns: [
+            PlainColumn("程式", sort: KeyPathComparator(\.name)) { app in nameCell(app) },
+            PlainColumn("下載", width: 90, alignment: .trailing, sort: KeyPathComparator(\.bytes.rx, order: .reverse)) {
+                Text(settings.format($0.bytes.rx))
+            },
+            PlainColumn("上傳", width: 90, alignment: .trailing, sort: KeyPathComparator(\.bytes.tx, order: .reverse)) {
+                Text(settings.format($0.bytes.tx))
+            },
+            PlainColumn("合計", width: 90, alignment: .trailing, sort: byTotal) { Text(settings.format($0.bytes.total)) },
+            PlainColumn("佔比", width: 60, alignment: .trailing, sort: byTotal) { app in
                 Text(String(format: "%.1f%%", Double(app.bytes.total) / sum * 100))
             },
-        ])
+        ], sortOrder: $sortOrder)
     }
 
     private func reload() {
