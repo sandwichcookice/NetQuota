@@ -17,6 +17,28 @@ enum MenuBarStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// 流量監測：只看用量，沒有上限；每日額度：依各網路的上限顯示剩餘、預測超標並通知。
+enum UsageMode: String, CaseIterable, Identifiable {
+    case monitor
+    case quota
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .monitor: "流量監測"
+        case .quota: "每日額度"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .monitor: "專心看流量：今日用量、上傳／下載、速率與歷史，沒有上限也不會有額度通知。"
+        case .quota: "替網路設定每日上限（例如宿舍 12GB），顯示剩餘額度、預測何時用完，並在接近上限時通知。"
+        }
+    }
+}
+
 /// 使用者設定，存在 UserDefaults。
 @MainActor
 final class AppSettings: ObservableObject {
@@ -24,6 +46,9 @@ final class AppSettings: ObservableObject {
 
     /// 舊版的單一上限，只用來在升級時套用到第一個偵測到的網路。上限現在依網路各自設定。
     let quotaGB: Double
+    @Published var usageMode: UsageMode { didSet { defaults.set(usageMode.rawValue, forKey: "usageMode") } }
+    /// 升級前沒有模式設定：要等讀到網路後，依有沒有設過上限決定（見 TrafficCollector.start）。
+    private(set) var needsModeMigration: Bool
     @Published var binaryUnits: Bool { didSet { defaults.set(binaryUnits, forKey: "binaryUnits") } }
     @Published var resetHour: Int { didSet { defaults.set(resetHour, forKey: "resetHour") } }
     @Published var alertsEnabled: Bool { didSet { defaults.set(alertsEnabled, forKey: "alertsEnabled") } }
@@ -60,6 +85,9 @@ final class AppSettings: ObservableObject {
             "showMenuBarItem": true,
         ])
         quotaGB = defaults.double(forKey: "quotaGB")
+        let storedMode = defaults.string(forKey: "usageMode").flatMap(UsageMode.init(rawValue:))
+        usageMode = storedMode ?? .monitor
+        needsModeMigration = storedMode == nil
         binaryUnits = defaults.bool(forKey: "binaryUnits")
         resetHour = defaults.integer(forKey: "resetHour")
         alertsEnabled = defaults.bool(forKey: "alertsEnabled")
@@ -77,6 +105,15 @@ final class AppSettings: ObservableObject {
             defaults.set(Self.visibleStatusItemPosition, forKey: Self.statusItemPositionKey)
         }
     }
+
+    /// 新安裝預設流量監測；已經替任何網路設過上限的舊使用者維持每日額度模式。
+    func migrateModeIfNeeded(hasQuota: Bool) {
+        guard needsModeMigration else { return }
+        needsModeMigration = false
+        usageMode = hasQuota ? .quota : .monitor
+    }
+
+    var isQuotaMode: Bool { usageMode == .quota }
 
     /// 「一天」的切法（上限依網路各自設定，這裡不使用 quotaBytes）。
     var policy: QuotaPolicy {

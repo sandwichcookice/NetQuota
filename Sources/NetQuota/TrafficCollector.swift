@@ -16,10 +16,11 @@ struct NetworkUsage: Identifiable {
     let bytes: ByteCounts
     let calibration: Double
     let isCurrent: Bool
+    /// 有效的上限：流量監測模式或沒設定時為 nil。
+    let quota: Double?
 
     var id: String { network.id }
     var used: Double { max(0, Double(bytes.total) + calibration) }
-    var quota: Double? { network.quotaBytes }
     var fraction: Double? { quota.map { $0 > 0 ? used / $0 : 0 } }
 }
 
@@ -85,19 +86,25 @@ final class TrafficCollector: ObservableObject {
     var calibration: Double { focusNetworkID.flatMap { calibrations[$0] } ?? 0 }
     var focusBytes: ByteCounts { focusNetworkID.flatMap { todayByNetwork[$0] } ?? .zero }
     var used: Double { max(0, Double(focusBytes.total) + calibration) }
-    var quota: Double? { focusNetwork?.quotaBytes }
+    var quota: Double? { effectiveQuota(focusNetwork) }
     var remaining: Double? { quota.map { max(0, $0 - used) } }
     var fraction: Double { quota.map { $0 > 0 ? used / $0 : 0 } ?? 0 }
     var totalUsed: Double { max(0, Double(today.total) + calibrations.values.reduce(0, +)) }
+
+    /// 每日額度模式下這個網路的上限；流量監測模式一律沒有上限（設定值仍保留，切回來就恢復）。
+    func effectiveQuota(_ network: NetworkRecord?) -> Double? {
+        settings.isQuotaMode ? network?.quotaBytes : nil
+    }
 
     /// 今天有用量、有設上限、或目前所在的網路。
     var networkUsages: [NetworkUsage] {
         networks.compactMap { network in
             let bytes = todayByNetwork[network.id] ?? .zero
             let isCurrent = network.id == focusNetworkID
-            guard !bytes.isZero || network.quotaBytes != nil || isCurrent else { return nil }
+            let quota = effectiveQuota(network)
+            guard !bytes.isZero || quota != nil || isCurrent else { return nil }
             return NetworkUsage(network: network, bytes: bytes, calibration: calibrations[network.id] ?? 0,
-                                isCurrent: isCurrent)
+                                isCurrent: isCurrent, quota: quota)
         }
         .sorted { ($0.isCurrent ? 1 : 0, $0.used) > ($1.isCurrent ? 1 : 0, $1.used) }
     }
@@ -118,6 +125,7 @@ final class TrafficCollector: ObservableObject {
         focusNetworkID = store.state("focusNetwork")
         bootTime = InterfaceCounter.bootTime()
         refreshNetwork()
+        settings.migrateModeIfNeeded(hasQuota: networks.contains { $0.quotaBytes != nil })
         recoverGap()
         seedForecastWindow()
         reloadToday()
@@ -138,6 +146,11 @@ final class TrafficCollector: ObservableObject {
                 self?.flush()
                 self?.reloadToday()
             }
+        }.store(in: &cancellables)
+
+        settings.$usageMode.dropFirst().sink { [weak self] _ in
+            // @Published 在值改變前送出，等下一輪再用新的模式重算。
+            Task { @MainActor in self?.updateForecast(now: Date()) }
         }.store(in: &cancellables)
 
         let center = NotificationCenter.default
@@ -285,7 +298,7 @@ final class TrafficCollector: ObservableObject {
 
     private func checkAlerts() {
         for network in networks {
-            guard let quota = network.quotaBytes else { continue }
+            guard let quota = effectiveQuota(network) else { continue }
             let used = usage(for: network.id)
             guard used > 0 else { continue }
             alerts.checkQuota(day: dayKey, network: network.id, name: network.displayName, used: used, quota: quota,
@@ -361,9 +374,11 @@ final class TrafficCollector: ObservableObject {
             .sorted { $0.bytes.total > $1.bytes.total }
     }
 
-    /// 只針對目前網路，沒有上限的網路不預測。有歷史資料時依過去同時段的用量推估，否則用最近 30 分鐘的速率。
+    /// 只針對目前網路；額度模式下沒有上限的網路不預測，流量監測模式只推估今天的總用量。
+    /// 有歷史資料時依過去同時段的用量推估，否則用最近 30 分鐘的速率。
     private func updateForecast(now: Date) {
-        guard let quota, let focusNetworkID else {
+        let target = settings.isQuotaMode ? quota : .infinity
+        guard let quota = target, let focusNetworkID else {
             forecast = nil
             return
         }

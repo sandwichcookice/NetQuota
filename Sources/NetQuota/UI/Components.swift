@@ -60,6 +60,37 @@ struct UsageRing: View {
     }
 }
 
+/// 流量監測模式取代圓環：只顯示今日用量的大數字，大小與 UsageRing 相同。
+struct UsageFigure: View {
+    @Environment(\.theme) private var theme
+    let usedText: String
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.title3)
+                .foregroundStyle(theme.secondary)
+                .glow()
+            Group {
+                if theme.isHack { ScrambleText(text: usedText) } else { Text(usedText) }
+            }
+            .font(.system(size: theme.isHack ? 22 : 26, weight: .bold))
+            .monospacedDigit()
+            .minimumScaleFactor(0.6)
+            .lineLimit(1)
+            .foregroundStyle(theme.isHack ? theme.accent : .primary)
+            .glow()
+            Text(theme.isHack ? "[TODAY]" : "今日用量")
+                .font(.caption)
+                .foregroundStyle(theme.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("今日用量")
+        .accessibilityValue(usedText)
+    }
+}
+
 /// 程式圖示：.app 用系統圖示，其他執行檔用終端機符號。
 struct AppIconView: View {
     @Environment(\.theme) private var theme

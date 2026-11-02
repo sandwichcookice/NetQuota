@@ -57,7 +57,7 @@ struct TodayView: View {
         return Scope(name: network?.displayName ?? "未連線",
                      bytes: id.flatMap { collector.todayByNetwork[$0] } ?? .zero,
                      calibration: id.flatMap { collector.calibrations[$0] } ?? 0,
-                     quota: network?.quotaBytes,
+                     quota: collector.effectiveQuota(network),
                      forecast: id == collector.focusNetworkID ? collector.forecast : nil,
                      networkID: id)
     }
@@ -121,12 +121,14 @@ struct TodayView: View {
         }
     }
 
-    /// 主要指標：這個 App 要回答的問題——還剩多少、今天會不會超過。
+    /// 主要指標：額度模式回答「還剩多少、今天會不會超過」；流量監測模式回答「今天用了多少」。
     private func hero(_ scope: Scope) -> some View {
         HStack(alignment: .center, spacing: 22) {
-            UsageRing(fraction: scope.fraction, usedText: settings.format(scope.used),
-                      quotaText: scope.quota.map { settings.format($0) }, lineWidth: 11)
-                .frame(width: 118, height: 118)
+            if settings.isQuotaMode {
+                UsageRing(fraction: scope.fraction, usedText: settings.format(scope.used),
+                          quotaText: scope.quota.map { settings.format($0) }, lineWidth: 11)
+                    .frame(width: 118, height: 118)
+            }
             VStack(alignment: .leading, spacing: 7) {
                 Text(scope.remaining.map { "剩 \(settings.format($0))" } ?? "今日 \(settings.format(scope.used))")
                     .font(.system(size: 30, weight: .bold))
@@ -135,7 +137,8 @@ struct TodayView: View {
                     .glow()
                 Text(scope.quota.map {
                     "已用 \(settings.format(scope.used)) / 上限 \(settings.format($0)) · \(Int((scope.fraction * 100).rounded()))%"
-                } ?? "\(scope.name) 沒有設定上限")
+                } ?? (settings.isQuotaMode ? "\(scope.name) 沒有設定上限"
+                                           : "\(scope.name) · 下載 \(settings.format(scope.bytes.rx)) · 上傳 \(settings.format(scope.bytes.tx))"))
                     .font(.callout).monospacedDigit().foregroundStyle(theme.secondary)
                 status(scope)
                 Text(methodText(scope) + " · \(collector.dayEnd.shortTime) 歸零")
@@ -155,8 +158,11 @@ struct TodayView: View {
             if let quota = scope.quota, scope.used >= quota {
                 Label("已超過上限 \(settings.format(scope.used - quota))", systemImage: "xmark.octagon.fill")
                     .foregroundStyle(theme.bad)
-            } else if scope.quota == nil {
+            } else if scope.quota == nil, settings.isQuotaMode {
                 Label("只記錄、不提醒", systemImage: "infinity").foregroundStyle(theme.secondary)
+            } else if let forecast = scope.forecast, scope.quota == nil {
+                Label("照目前趨勢今天約用 \(settings.format(forecast.projectedTotal))", systemImage: "chart.line.uptrend.xyaxis")
+                    .foregroundStyle(theme.secondary)
             } else if let forecast = scope.forecast {
                 if let exceedAt = forecast.exceedAt {
                     Label("照目前趨勢，預計 \(exceedAt.shortTime) 超過上限", systemImage: "exclamationmark.triangle.fill")
