@@ -98,7 +98,7 @@ public final class TrafficStore {
         try migrate()
     }
 
-    public static let schemaVersion: Int64 = 3
+    public static let schemaVersion: Int64 = 4
 
     private func migrate() throws {
         var version: Int64 = 0
@@ -154,6 +154,35 @@ public final class TrafficStore {
                     PRAGMA user_version = 3;
                     """)
             }
+        }
+        if version < 4 {
+            try db.transaction {
+                // v4：程式命名規則改變（Claude Code 和版本號檔名），依記下的路徑把舊名稱改成新名稱。
+                try renameAppsByPath()
+                try db.exec("PRAGMA user_version = 4")
+            }
+        }
+    }
+
+    /// 用目前的命名規則重新推算每個有路徑的程式名稱，不同時把紀錄合併到新名稱底下。
+    func renameAppsByPath() throws {
+        var renames: [(old: String, new: String, path: String)] = []
+        try db.query("SELECT app, path FROM app_path WHERE path IS NOT NULL") { row in
+            guard let app = row.text(0), let path = row.text(1) else { return }
+            let name = AppResolver.identity(forExecutablePath: path).name
+            if name != app { renames.append((app, name, path)) }
+        }
+        for rename in renames {
+            for table in ["hour_app", "minute_app"] {
+                try db.run("""
+                    INSERT INTO \(table) (ts, app, rx, tx) SELECT ts, ?, rx, tx FROM \(table) WHERE app = ?
+                    ON CONFLICT(ts, app) DO UPDATE SET rx = rx + excluded.rx, tx = tx + excluded.tx
+                    """, [.text(rename.new), .text(rename.old)])
+                try db.run("DELETE FROM \(table) WHERE app = ?", [.text(rename.old)])
+            }
+            try db.run("UPDATE sample_app SET app = ? WHERE app = ?", [.text(rename.new), .text(rename.old)])
+            try db.run("DELETE FROM app_path WHERE app = ?", [.text(rename.old)])
+            try setAppPath(rename.new, path: AppResolver.identity(forExecutablePath: rename.path).path)
         }
     }
 

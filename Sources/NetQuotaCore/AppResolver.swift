@@ -62,14 +62,30 @@ public final class AppResolver {
     }
 
     /// 從執行檔路徑推出顯示名稱：位於 .app 內的取最外層 .app 的名稱，否則取執行檔名。
+    /// 以版本號為檔名的執行檔（例如 `~/.local/share/claude/versions/2.1.312`）取 `versions` 上一層的資料夾名稱，
+    /// 這樣升級後仍算同一個程式。
     public static func identity(forExecutablePath path: String) -> AppIdentity {
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
         if let index = components.firstIndex(where: { $0.hasSuffix(".app") }) {
             let bundlePath = "/" + components[...index].joined(separator: "/")
+            // Claude 桌面版內建的 Claude Code（Application Support/Claude/claude-code/<版本>/…/claude.app），
+            // 和桌面版本身（Claude.app）分開算。
+            if components[index] == "claude.app", components[..<index].contains("claude-code") {
+                return AppIdentity(name: "Claude Code（桌面版）", path: bundlePath)
+            }
             let name = String(components[index].dropLast(4))
             return AppIdentity(name: name, path: bundlePath)
         }
-        let name = components.last.map(String.init) ?? path
+        var name = components.last.map(String.init) ?? path
+        if components.count >= 3, isVersionNumber(name), components[components.count - 2] == "versions" {
+            name = String(components[components.count - 3])
+        }
+        if name == "claude" { name = "Claude Code（CLI）" }
         return AppIdentity(name: name, path: path)
+    }
+
+    static func isVersionNumber<S: StringProtocol>(_ text: S) -> Bool {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count >= 2 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
     }
 }

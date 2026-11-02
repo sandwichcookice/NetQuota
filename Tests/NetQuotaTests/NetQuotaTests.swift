@@ -202,6 +202,24 @@ private func date(_ text: String) -> Date {
         let identity = AppResolver.identity(forExecutablePath: "/usr/bin/curl")
         #expect(identity.name == "curl")
     }
+
+    @Test func claudeDesktopAndClaudeCodeAreSeparate() {
+        #expect(AppResolver.identity(forExecutablePath:
+            "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper").name == "Claude")
+        let desktop = AppResolver.identity(forExecutablePath:
+            "/Users/someone/Library/Application Support/Claude/claude-code/2.1.309/0123abcd4567/claude.app/Contents/MacOS/claude")
+        #expect(desktop.name == "Claude Code（桌面版）")
+        #expect(desktop.path == "/Users/someone/Library/Application Support/Claude/claude-code/2.1.309/0123abcd4567/claude.app")
+        #expect(AppResolver.identity(forExecutablePath: "/Users/someone/.local/share/claude/versions/2.1.312").name
+                == "Claude Code（CLI）")
+        #expect(AppResolver.identity(forExecutablePath: "/opt/homebrew/bin/claude").name == "Claude Code（CLI）")
+    }
+
+    @Test func versionNamedExecutableUsesToolName() {
+        #expect(AppResolver.identity(forExecutablePath: "/Users/someone/.local/share/foo/versions/1.4.2").name == "foo")
+        #expect(AppResolver.identity(forExecutablePath: "/usr/local/bin/1.4.2").name == "1.4.2")
+        #expect(AppResolver.identity(forExecutablePath: "/opt/tool/versions/latest").name == "latest")
+    }
 }
 
 @Suite struct TrafficStoreTests {
@@ -239,6 +257,34 @@ private func date(_ text: String) -> Date {
         try store.setPeak(day: "2026-11-01", DayPeak(rxRate: 5, rxAt: now, txRate: 1, txAt: nil))
         #expect(store.peak(day: "2026-11-01")?.rxRate == 5)
         #expect(store.peak(day: "2026-11-01")?.txAt == nil)
+    }
+
+    @Test func renamesAppsWhenNamingRulesChange() throws {
+        let store = try TrafficStore(path: ":memory:")
+        let now = date("2026-11-01 10:15")
+        let cli = "/Users/someone/.local/share/claude/versions/2.1.312"
+        // 舊版用版本號當名稱；同一小時已經有新名稱的紀錄時要合併。
+        try store.addAppHour(at: now, app: "2.1.312", ByteCounts(rx: 10, tx: 1))
+        try store.addAppHour(at: now, app: "Claude Code（CLI）", ByteCounts(rx: 5, tx: 0))
+        try store.addAppMinute(at: now, app: "2.1.312", ByteCounts(rx: 10, tx: 1))
+        try store.addAppSample(AppSample(time: now, app: "2.1.312", pid: 7, bytes: ByteCounts(rx: 10, tx: 1), network: nil))
+        try store.setAppPath("2.1.312", path: cli)
+        try store.addAppHour(at: now, app: "Safari", ByteCounts(rx: 3, tx: 0))
+        try store.setAppPath("Safari", path: "/Applications/Safari.app")
+
+        try store.renameAppsByPath()
+
+        let apps = store.appTotals(from: date("2026-11-01 00:00"), to: date("2026-11-02 00:00"))
+        #expect(apps.map(\.name) == ["Claude Code（CLI）", "Safari"])
+        #expect(apps[0].bytes == ByteCounts(rx: 15, tx: 1))
+        #expect(apps[0].path == cli)
+        #expect(store.appPaths()["2.1.312"] == nil)
+        var minuteApps: [String] = []
+        try store.db.query("SELECT app FROM minute_app") { minuteApps.append($0.text(0) ?? "") }
+        #expect(minuteApps == ["Claude Code（CLI）"])
+        var sampleApps: [String] = []
+        try store.db.query("SELECT app FROM sample_app") { sampleApps.append($0.text(0) ?? "") }
+        #expect(sampleApps == ["Claude Code（CLI）"])
     }
 }
 
