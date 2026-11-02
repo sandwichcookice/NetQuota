@@ -38,11 +38,11 @@ public struct NettopParser {
         var deltas: [Int32: ByteCounts] = [:]
         for (key, current) in flows.counters {
             let old = previous[key] ?? .zero
-            // 同一組位址被新的 socket 重用時，累計值會比上次小，整筆都是新的流量。
-            let rx = current.rx >= old.rx ? current.rx - old.rx : current.rx
-            let tx = current.tx >= old.tx ? current.tx - old.tx : current.tx
-            guard rx > 0 || tx > 0, let pid = flows.owners[key] else { continue }
-            deltas[pid, default: .zero] += ByteCounts(rx: rx, tx: tx)
+            // 同一組位址被新的 socket 重用時，累計值會比上次小；只要任一方向變小，兩個方向都是新的流量。
+            let reused = current.rx < old.rx || current.tx < old.tx
+            let delta = reused ? current : ByteCounts(rx: current.rx - old.rx, tx: current.tx - old.tx)
+            guard !delta.isZero, let pid = flows.owners[key] else { continue }
+            deltas[pid, default: .zero] += delta
         }
         return deltas
             .compactMap { pid, bytes in flows.names[pid].map { ProcessSample(name: $0, pid: pid, bytes: bytes) } }
@@ -69,9 +69,8 @@ public struct NettopParser {
                 flows.counters[key, default: .zero] += flow.bytes
                 flows.owners[key] = owner
             } else {
-                // 程序列的數字可能是空的，只取名稱和 pid。
-                let label = line.split(separator: ",", omittingEmptySubsequences: false).first ?? ""
-                owner = processLabel(label).map { process in
+                // 程序列的數字可能是空的；名稱可能含逗號，所以從尾端剝掉計數欄位。
+                owner = processLabel(stripCounters(line)).map { process in
                     flows.names[process.pid] = process.name
                     return process.pid
                 }
@@ -103,6 +102,17 @@ public struct NettopParser {
         else { return nil }
         guard let process = processLabel(fields[0..<(fields.count - 2)].joined(separator: ",")) else { return nil }
         return ProcessSample(name: process.name, pid: process.pid, bytes: ByteCounts(rx: rx, tx: tx))
+    }
+
+    /// 去掉尾端的空欄位與兩個數字欄位：`Browser, Inc.123,200,20,` 與 `mDNSResponder.425,,,` 都回傳標籤本身。
+    private static func stripCounters(_ line: String) -> String {
+        var fields = line.split(separator: ",", omittingEmptySubsequences: false)
+        while fields.count > 1, fields.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { fields.removeLast() }
+        if fields.count >= 3, UInt64(fields[fields.count - 1].trimmingCharacters(in: .whitespaces)) != nil,
+           UInt64(fields[fields.count - 2].trimmingCharacters(in: .whitespaces)) != nil {
+            fields.removeLast(2)
+        }
+        return fields.joined(separator: ",")
     }
 
     /// `Google Chrome H.1234` → 名稱與 pid。

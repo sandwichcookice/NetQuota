@@ -226,6 +226,17 @@ private func date(_ text: String) -> Date {
         _ = parser.snapshot("curl.1,500,5,\ntcp4 a:1<->b:2,500,5,\n")
         #expect(parser.snapshot("curl.1,20,2,\ntcp4 a:1<->b:2,20,2,\n")
             == [ProcessSample(name: "curl", pid: 1, bytes: ByteCounts(rx: 20, tx: 2))])
+        // 只有一個方向變小也算重用：另一個方向整筆都是新流量，不扣掉舊 socket 的。
+        _ = parser.snapshot("curl.1,1000,10,\ntcp4 a:1<->b:2,1000,10,\n")
+        #expect(parser.snapshot("curl.1,100,20,\ntcp4 a:1<->b:2,100,20,\n")
+            == [ProcessSample(name: "curl", pid: 1, bytes: ByteCounts(rx: 100, tx: 20))])
+    }
+
+    @Test func processNameMayContainCommas() {
+        var parser = NettopParser(flowPrefix: "quic")
+        _ = parser.snapshot("Browser, Inc.123,200,20,\nquic4 a:1<->b:443,200,20,\nmDNSResponder.425,,,\nudp4 *:5353<->*:*,,,\n")
+        #expect(parser.snapshot("Browser, Inc.123,260,20,\nquic4 a:1<->b:443,260,20,\nmDNSResponder.425,,,\nudp4 *:5353<->*:*,,,\n")
+            == [ProcessSample(name: "Browser, Inc", pid: 123, bytes: ByteCounts(rx: 60, tx: 0))])
     }
 }
 
@@ -242,6 +253,27 @@ private func date(_ text: String) -> Date {
         #expect(sampler.hasSources)
         sampler.stop()
         #expect(!sampler.hasSources)
+    }
+
+    /// 計數比描述先到、還不知道 pid 時，增量要暫存，等描述帶來 pid 再歸入，不能丟掉。
+    @Test func countsBeforeDescriptionAreKept() {
+        var source = NetworkStatisticsSampler.Source(existedAtStart: false)
+        #expect(source.ingest(ByteCounts(rx: 100, tx: 10), afterBaseline: true, loopback: 1) == nil)
+        #expect(source.ingest(ByteCounts(rx: 150, tx: 10), afterBaseline: true, loopback: 1) == nil)
+        source.update(from: ["processID": 42, "processName": "curl", "interface": 14])
+        #expect(source.takeAttributable(loopback: 1) == ByteCounts(rx: 150, tx: 10))
+        #expect(source.takeAttributable(loopback: 1) == nil)
+        #expect(source.ingest(ByteCounts(rx: 160, tx: 12), afterBaseline: true, loopback: 1) == ByteCounts(rx: 10, tx: 2))
+    }
+
+    @Test func existingSourceFirstCountsAreBaseline() {
+        var source = NetworkStatisticsSampler.Source(existedAtStart: true)
+        source.update(from: ["processID": 7])
+        #expect(source.ingest(ByteCounts(rx: 5000, tx: 500), afterBaseline: true, loopback: 1) == nil)
+        #expect(source.ingest(ByteCounts(rx: 5100, tx: 500), afterBaseline: true, loopback: 1) == ByteCounts(rx: 100, tx: 0))
+        // loopback 的不算。
+        source.update(from: ["interface": 1])
+        #expect(source.ingest(ByteCounts(rx: 5200, tx: 500), afterBaseline: true, loopback: 1) == nil)
     }
 
     @Test func monitorPrefersFramework() async throws {

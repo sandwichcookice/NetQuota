@@ -56,7 +56,7 @@ final class NetworkStatisticsSampler: @unchecked Sendable {
     }
 
     /// 一條連線的程序資訊與最近一次的計數。
-    private struct Source {
+    struct Source {
         /// nil 代表還沒收到第一筆計數。
         var last: ByteCounts?
         /// 啟動時就存在的連線，第一筆計數是歷史累計值，只當基準點；之後新開的連線整筆都算。
@@ -65,11 +65,34 @@ final class NetworkStatisticsSampler: @unchecked Sendable {
         var pid: Int32?
         var name = ""
         var interface: UInt32?
+        /// 還不知道程序時先暫存的增量，描述帶來 pid 後再歸入。
+        private(set) var unattributed = ByteCounts.zero
+
+        init(existedAtStart: Bool) {
+            self.existedAtStart = existedAtStart
+        }
 
         mutating func update(from dict: [String: Any]) {
             if let pid = (dict["processID"] as? NSNumber)?.int32Value { self.pid = pid }
             if let name = dict["processName"] as? String, !name.isEmpty { self.name = name }
             if let interface = (dict["interface"] as? NSNumber)?.uint32Value { self.interface = interface }
+        }
+
+        /// 記下新的計數並回傳可歸給程序的增量（含之前暫存的）；還不知道程序時暫存、回傳 nil。
+        mutating func ingest(_ counts: ByteCounts, afterBaseline: Bool, loopback: UInt32) -> ByteCounts? {
+            let last = last ?? (existedAtStart ? counts : .zero)
+            self.last = counts
+            // 核心的計數只增不減；基準點之前的只用來建立基準。
+            guard afterBaseline, counts.rx >= last.rx, counts.tx >= last.tx else { return nil }
+            unattributed += ByteCounts(rx: counts.rx - last.rx, tx: counts.tx - last.tx)
+            return takeAttributable(loopback: loopback)
+        }
+
+        /// 已知程序時取出暫存的增量。只算非 loopback 介面（和 nettop -t external 一樣）；還沒綁定介面的也算。
+        mutating func takeAttributable(loopback: UInt32) -> ByteCounts? {
+            guard pid != nil, !unattributed.isZero else { return nil }
+            defer { unattributed = .zero }
+            return interface == loopback ? nil : unattributed
         }
     }
 
@@ -153,8 +176,10 @@ final class NetworkStatisticsSampler: @unchecked Sendable {
         sources[source] = Source(existedAtStart: !baselineDone)
         // 計數訊息不一定帶程序資訊，要另外查描述。
         let description: DictBlock = { [weak self] dict in
-            guard let self, let dict = dict as? [String: Any] else { return }
-            sources[source]?.update(from: dict)
+            guard let self, let dict = dict as? [String: Any], var entry = sources[source] else { return }
+            entry.update(from: dict)
+            if let delta = entry.takeAttributable(loopback: loopbackIndex) { attribute(delta, to: entry) }
+            sources[source] = entry
         }
         api.setDescription(source, description as AnyObject)
         let counts: DictBlock = { [weak self] dict in
@@ -182,13 +207,14 @@ final class NetworkStatisticsSampler: @unchecked Sendable {
         guard var entry = sources[source] else { return }
         entry.update(from: dict)
         let counts = ByteCounts(rx: Self.number(dict, "rxBytes"), tx: Self.number(dict, "txBytes"))
-        let last = entry.last ?? (entry.existedAtStart ? counts : .zero)
-        entry.last = counts
+        if let delta = entry.ingest(counts, afterBaseline: baselineDone, loopback: loopbackIndex) {
+            attribute(delta, to: entry)
+        }
         sources[source] = entry
-        // 只算非 loopback 介面（和 nettop -t external 一樣）；還沒綁定介面的也算。
-        guard baselineDone, counts.rx >= last.rx, counts.tx >= last.tx, entry.interface != loopbackIndex else { return }
-        let delta = ByteCounts(rx: counts.rx - last.rx, tx: counts.tx - last.tx)
-        guard !delta.isZero, let pid = entry.pid else { return }
+    }
+
+    private func attribute(_ delta: ByteCounts, to entry: Source) {
+        guard let pid = entry.pid else { return }
         let name = !entry.name.isEmpty ? entry.name : pending[pid]?.name ?? "pid \(pid)"
         pending[pid] = (name, (pending[pid]?.bytes ?? .zero) + delta)
     }
