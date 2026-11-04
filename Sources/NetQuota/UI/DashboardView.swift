@@ -33,14 +33,23 @@ extension DashboardTab: CaseIterable, Identifiable {
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    /// 關掉儀表板後系統仍保留視窗，裡面的畫面會跟著每次取樣重算、每分鐘重查資料庫，
+    /// 所以關閉時拿掉內容，重新打開再建立。
+    @State private var isOpen = true
 
     var body: some View {
-        Group {
-            switch theme.kind {
-            case .hack: hackLayout
-            case .glass where theme.isGlass: glassAppearanceLayout
-            case .standard where theme.liquidGlass: liquidGlassLayout
-            default: standardLayout
+        // 用 ZStack 而不是 Group：Group 會把下面的 onAppear/onDisappear 分給目前的分支，
+        // 切換成空白時又觸發一次，Dock 圖示和 isOpen 會跟著亂跳。
+        ZStack {
+            if !isOpen {
+                Color.clear
+            } else {
+                switch theme.kind {
+                case .hack: hackLayout
+                case .glass where theme.isGlass: glassAppearanceLayout
+                case .standard where theme.liquidGlass: liquidGlassLayout
+                default: standardLayout
+                }
             }
         }
         // 分頁在正中央、狀態列在右邊，同一行要放得下。
@@ -58,13 +67,17 @@ struct DashboardView: View {
         }
         // 儀表板開著時出現在 Dock 與 ⌘Tab，關掉後回到只有選單列。
         .onAppear {
+            isOpen = true
             NSApp.setActivationPolicy(.regular)
             // Dock 圖示要在 App 出現在 Dock 之後設定才會生效。
             DispatchQueue.main.async {
                 if let icon = NSImage(named: "AppIcon") { NSApp.applicationIconImage = icon }
             }
         }
-        .onDisappear { NSApp.setActivationPolicy(.accessory) }
+        .onDisappear {
+            isOpen = false
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     @ViewBuilder

@@ -260,3 +260,23 @@ private struct FooterButtonStyle: ViewModifier {
         }
     }
 }
+
+/// 選單列面板收起後系統仍保留視窗，裡面的畫面會跟著每次取樣重算，
+/// 所以收起時換成同樣大小的空白（避免下次打開時面板先縮小再撐開），打開時再重新建立。
+struct PopoverContainer: View {
+    @State private var isShown = true
+    @State private var size: CGSize?
+
+    var body: some View {
+        ZStack {
+            if isShown {
+                PopoverView()
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            } else {
+                Color.clear.frame(width: size?.width, height: size?.height)
+            }
+        }
+        .onAppear { isShown = true }
+        .onDisappear { isShown = false }
+    }
+}

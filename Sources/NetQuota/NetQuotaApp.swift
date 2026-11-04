@@ -97,7 +97,7 @@ struct NetQuotaApp: App {
     var body: some Scene {
         MenuBarExtra(isInserted: menuBarInserted) {
             ThemedRoot(settings: model.settings) {
-                PopoverView()
+                PopoverContainer()
             }
             .environmentObject(model)
             .environmentObject(model.settings)
